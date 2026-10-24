@@ -78,6 +78,10 @@ export const IPC_CHANNELS = {
     close: 'orderExport:close',
     downloaded: 'orderExport:downloaded',
   },
+  orderSync: {
+    getStatus: 'orderSync:getStatus',
+    status: 'orderSync:status',
+  },
   log: 'log',
   app: {
     openLogFolder: 'app:openLogFolder',

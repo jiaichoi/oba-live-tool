@@ -151,6 +151,22 @@ export interface IpcChannels {
     localPath: string
     message: string
   }) => void
+  [IPC_CHANNELS.orderSync.getStatus]: (accountId: string) => Promise<{
+    accountId: string
+    phase: 'idle' | 'verifying' | 'awaiting-verification' | 'failed' | 'current'
+    message: string
+    shopId: string | null
+    lastSuccessAt: string | null
+    updatedAt: string
+  } | null>
+  [IPC_CHANNELS.orderSync.status]: (status: {
+    accountId: string
+    phase: 'idle' | 'verifying' | 'awaiting-verification' | 'failed' | 'current'
+    message: string
+    shopId: string | null
+    lastSuccessAt: string | null
+    updatedAt: string
+  }) => void
 
   // Log
   [IPC_CHANNELS.log]: (message: LogMessage) => void
