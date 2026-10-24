@@ -204,6 +204,10 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_order_snapshots_order
             ON order_snapshots(shop_id, sku_order_id, batch_id);
+        CREATE TABLE IF NOT EXISTS current_open_batches (
+            shop_id TEXT PRIMARY KEY, batch_id INTEGER NOT NULL REFERENCES import_batches(id),
+            published_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS historical_orders (
             shop_id TEXT NOT NULL, shop_order_id TEXT NOT NULL, sku_order_id TEXT NOT NULL,
             product_code TEXT NOT NULL, product_name TEXT NOT NULL, color TEXT NOT NULL,
@@ -540,8 +544,12 @@ def validate_row(row, line):
     return item
 
 
-def save_orders(items, errors, source, source_type, history_only=False):
-    if not items and not errors:
+def save_orders(items, errors, source, source_type, history_only=False,
+                publish_open_shop=None, allow_complete_empty=False):
+    if errors:
+        raise ValueError(f"报表有 {len(errors)} 行未通过校验；本批未发布，原待发货快照保留。"
+                         + "；".join(errors[:3]))
+    if not items and not (allow_complete_empty and publish_open_shop):
         raise ValueError("CSV 没有数据行")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with connection() as db:
@@ -554,6 +562,13 @@ def save_orders(items, errors, source, source_type, history_only=False):
                           shipped_at=item.get("shipped_at", ""),
                           **{key: item.get(key, "") for key in RAW_ORDER_FIELDS}) for item in items]
         insert_snapshots(db, cursor.lastrowid, snapshots)
+        if publish_open_shop:
+            if any(item["shop_id"] != publish_open_shop for item in items):
+                raise ValueError("报表中包含其他店铺的订单；本批未发布")
+            db.execute("""INSERT INTO current_open_batches(shop_id,batch_id,published_at)
+                VALUES(?,?,?) ON CONFLICT(shop_id) DO UPDATE SET
+                batch_id=excluded.batch_id,published_at=excluded.published_at""",
+                (publish_open_shop, cursor.lastrowid, now))
         if history_only:
             columns = ",".join(SNAPSHOT_FIELDS) + ",first_batch_id,last_batch_id,first_imported_at,last_imported_at"
             placeholders = ",".join("?" for _ in range(len(SNAPSHOT_FIELDS) + 4))
@@ -676,7 +691,8 @@ def import_doudian_csv(content, shop_id, source="抖店后台商品维度 CSV", 
     if shipped_day and not items and not errors:
         raise ValueError(f"报表中没有 {shipped_day} 实际发货的子订单")
     return save_orders(items, errors, source, "doudian_history" if history_only else "doudian",
-                       history_only=history_only)
+                       history_only=history_only,
+                       publish_open_shop=shop_id if not history_only and not shipped_day else None)
 
 
 def shipped_orders(day, source_type="doudian"):
@@ -689,6 +705,10 @@ def shipped_orders(day, source_type="doudian"):
 def due_orders(day, overdue=False, source_type=None):
     """Return open child orders for a business date; overdue is a separate queue."""
     date.fromisoformat(day)
+    if source_type == "doudian":
+        return [row for row in open_snapshot_orders(source_type)
+                if (row["promised_ship_at"][:10] < day if overdue
+                    else row["promised_ship_at"][:10] == day)]
     comparison = "<" if overdue else "="
     with connection() as db:
         return db.execute(f"""SELECT * FROM orders WHERE substr(promised_ship_at,1,10) {comparison} ?
@@ -704,6 +724,21 @@ def due_orders(day, overdue=False, source_type=None):
 def open_snapshot_orders(source_type="doudian"):
     """Current open rows; Doudian rows are scoped to each shop's newest open import."""
     with connection() as db:
+        if source_type == "doudian":
+            published = db.execute("""SELECT s.*, b.imported_at AS imported_at
+                FROM current_open_batches AS current
+                JOIN order_snapshots AS s ON s.batch_id=current.batch_id AND s.shop_id=current.shop_id
+                JOIN import_batches AS b ON b.id=s.batch_id
+                WHERE s.source_type='doudian' AND s.status IN (?,?,?)""",
+                OPEN_STATUSES).fetchall()
+            legacy = db.execute("""SELECT * FROM orders WHERE source_type='doudian'
+                AND status IN (?,?,?) AND NOT EXISTS (
+                    SELECT 1 FROM current_open_batches WHERE shop_id=orders.shop_id)
+                AND imported_at=(SELECT MAX(imported_at) FROM orders AS latest
+                    WHERE latest.shop_id=orders.shop_id AND latest.source_type='doudian'
+                    AND latest.status IN (?,?,?))""", (*OPEN_STATUSES, *OPEN_STATUSES)).fetchall()
+            return sorted([*published, *legacy],
+                          key=lambda row: (row["promised_ship_at"], row["shop_order_id"], row["sku_order_id"]))
         return db.execute("""SELECT * FROM orders WHERE source_type=? AND status IN (?,?,?)
             AND (source_type!='doudian' OR imported_at=(
                 SELECT MAX(imported_at) FROM orders AS latest
@@ -711,6 +746,11 @@ def open_snapshot_orders(source_type="doudian"):
                 AND latest.status IN (?,?,?)))
             ORDER BY promised_ship_at,shop_order_id,sku_order_id""",
             (source_type, *OPEN_STATUSES, *OPEN_STATUSES)).fetchall()
+
+
+def latest_open_publication():
+    with connection() as db:
+        return db.execute("SELECT MAX(published_at) FROM current_open_batches").fetchone()[0]
 
 
 def size_matrix(rows, include_review=False):
@@ -1051,12 +1091,17 @@ class Handler(BaseHTTPRequestHandler):
             full_quantity = sum(r["quantity"] for r in full_rows)
             fallback_count = sum(r["code_source"] == "货号回退" for r in full_rows) if source_type == "doudian" else 0
             full_code_review = sum(r["code_source"] == "两列均空" for r in full_rows) if source_type == "doudian" else 0
-            snapshot_time = max((r["imported_at"] for r in full_rows), default="暂无")
+            snapshot_time = max((r["imported_at"] for r in full_rows), default="")
+            if source_type == "doudian":
+                snapshot_time = max(snapshot_time, latest_open_publication() or "")
+            snapshot_time = snapshot_time or "暂无"
             today_quantity = sum(r["quantity"] for r in today_rows)
             body = (
                 f'<section><h2>全部待发货 · 最新导入快照</h2>{source_links("/due", source_type)}'
                 f'<p><strong>{full_parents} 个主订单、{len(full_rows)} 个商品子订单、{full_quantity} 件</strong>；'
                 f'导入时间 {esc(snapshot_time)}。</p>'
+                '<p class="muted">同步状态：尚未接通自动同步。此处是本机已发布的导入快照；'
+                '未核实抖店全店报表范围前，不代表实时或全店完整待发货。</p>'
                 f'<p>其中 {esc(day)} 承诺发货 {today_quantity} 件。</p>'
                 f'<p class="muted">这里汇总该店最新待发货报表中的所有承诺日期；'
                 f'矩阵每个尺码格为商品件数，不是订单数。'
