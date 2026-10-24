@@ -8,9 +8,26 @@ import { useAccounts } from '@/hooks/useAccounts'
 
 type Status = { accountId: string; phase: string; message: string }
 type Result = { ok: boolean; message: string; localPath?: string }
-type DueRow = { shop_order_id: string; sku_order_id: string; merchant_code: string; product_id: string; product_name: string; color: string; size: string; quantity: number }
+type DueRow = { shop_order_id: string; sku_order_id: string; merchant_code: string; product_id: string; product_name: string;
+  color: string; size: string; quantity: number; variant_role?: 'color' | 'raw_spec'; variant_review_reason?: string }
 type DueView = { available: boolean; scope?: string; observed_at?: string; page_complete?: boolean; displayed_parent_count?: number; rows?: DueRow[] }
-const baseSizes = ['M', 'L', 'XL', '2XL', '3XL']
+function sizeOrder(value: string): [number, number | string] {
+  const size = value.toUpperCase()
+  const known: Record<string, number> = { XS: 0, S: 1, M: 2, L: 3, XL: 4 }
+  if (size in known) return [0, known[size]]
+  const multiple = size.match(/^(\d{1,2})XL$/)
+  if (multiple) return [0, 3 + Number(multiple[1])]
+  const numeric = size.match(/^(\d{2,3})(?:CM|厘米|码)$/)
+  if (numeric) return [1, Number(numeric[1])]
+  return [2, size]
+}
+
+function compareSizes(a: string, b: string): number {
+  const left = sizeOrder(a)
+  const right = sizeOrder(b)
+  return left[0] - right[0] || (typeof left[1] === 'number' && typeof right[1] === 'number'
+    ? left[1] - right[1] : String(left[1]).localeCompare(String(right[1]), 'zh-CN'))
+}
 
 export default function AutoOrders() {
   const accountId = useAccounts(state => state.currentAccountId)
@@ -57,12 +74,11 @@ export default function AutoOrders() {
     finally { setBusy(false) }
   }
   const rows = view?.available && view.scope === 'recent_6_months_pending' && Array.isArray(view.rows) ? view.rows : []
-  const sizes = useMemo(() => [...baseSizes, ...[...new Set(rows.map(row => row.size))]
-    .filter(size => size && !baseSizes.includes(size)).sort()], [rows])
+  const sizes = useMemo(() => [...new Set(rows.map(row => row.size).filter(Boolean))].sort(compareSizes), [rows])
   const groups = useMemo(() => {
     const values = new Map<string, { row: DueRow; sizes: Record<string, number>; children: number; quantity: number }>()
     for (const row of rows) {
-      const key = [row.product_id, row.merchant_code, row.product_name, row.color].join('|')
+      const key = JSON.stringify([row.product_id, row.merchant_code, row.product_name, row.color, row.variant_role])
       const group = values.get(key) ?? { row, sizes: {}, children: 0, quantity: 0 }
       group.sizes[row.size] = (group.sizes[row.size] ?? 0) + Number(row.quantity)
       group.children += 1
@@ -104,9 +120,9 @@ export default function AutoOrders() {
           <p className="mt-1 text-sm text-muted-foreground">页面当时显示主订单 {view.displayed_parent_count ?? '待核'} 个；店铺 ID 尚待核实。这是读取时点快照，不代表实时同步。</p>
           {rows.length === 0 ? <p className="mt-5">本次待发货 0 单。</p> :
             <div className="mt-5 overflow-x-auto"><table className="w-full border-collapse text-sm">
-              <thead><tr className="bg-slate-50"><th className="p-3 text-left">商家编码或商品名称 · 颜色</th>{sizes.map(size => <th key={size} className="p-3 text-center">{size}</th>)}<th className="p-3 text-center">源订单数量</th><th className="p-3 text-center">商品子订单</th></tr></thead>
-              <tbody>{groups.map(group => <tr key={[group.row.product_id, group.row.merchant_code, group.row.color].join('|')} className="border-t">
-                <td className="p-3"><div className="font-medium">{group.row.merchant_code || group.row.product_name} · {group.row.color}</div><div className="text-xs text-muted-foreground">{group.row.merchant_code ? '商家编码' : '商家编码未填写；按商品名称展示'}｜商品 ID：{group.row.product_id}</div></td>
+              <thead><tr className="bg-slate-50"><th className="p-3 text-left">商家编码或商品名称 · 颜色/款式/原规格</th>{sizes.map(size => <th key={size} className="p-3 text-center">{size}</th>)}<th className="p-3 text-center">源订单数量</th><th className="p-3 text-center">商品子订单</th></tr></thead>
+              <tbody>{groups.map(group => <tr key={JSON.stringify([group.row.product_id, group.row.merchant_code, group.row.product_name, group.row.color, group.row.variant_role])} className="border-t">
+                <td className="p-3"><div className="font-medium">{group.row.merchant_code || group.row.product_name} · {group.row.variant_role === 'raw_spec' ? '原规格：' : ''}{group.row.color}</div><div className="text-xs text-muted-foreground">{group.row.merchant_code ? '商家编码' : '商家编码未填写；按商品名称展示'}｜商品 ID：{group.row.product_id}{group.row.variant_review_reason ? `｜${group.row.variant_review_reason}` : ''}</div></td>
                 {sizes.map(size => <td key={size} className="p-3 text-center">{group.sizes[size] || '—'}</td>)}
                 <td className="p-3 text-center">{group.quantity}</td><td className="p-3 text-center">{group.children}</td>
               </tr>)}</tbody></table></div>}

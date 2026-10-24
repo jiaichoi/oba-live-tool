@@ -1,8 +1,20 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { parseVisibleRows } from './DoudianPendingOrderReader'
+import { parseStructuredVariant, parseVisibleRows } from './DoudianPendingOrderReader'
 
 describe('visible Doudian parent and merchandise rows', () => {
+  it('reads structured SKU property names and values without a colour list', () => {
+    assert.deepEqual(parseStructuredVariant({ sku_properties: [
+      { name: '颜色分类', value: '月影蓝' }, { name: '尺码', value: '加大号' },
+    ] }), { color: '月影蓝', size: '加大号', role: 'color' })
+    assert.deepEqual(parseStructuredVariant({ color: '雾松绿', size: '110cm' }),
+      { color: '雾松绿', size: '110cm', role: 'color' })
+    assert.deepEqual(parseStructuredVariant({ sku_spec: '雾松绿/5XL' }),
+      { color: '雾松绿', size: '5XL', role: 'color' })
+    assert.deepEqual(parseStructuredVariant({ sku_spec: '女-鸿运套装/2XL' }),
+      { color: '女-鸿运套装', size: '2XL', role: 'raw_spec' })
+    assert.equal(parseStructuredVariant({ sku_properties: [{ name: '花色', value: '01' }] }), null)
+  })
   it('keeps parent and SKU counts distinct and reads only order columns', () => {
     const result = parseVisibleRows([
       { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789 下单时间 2026-10-24 12:36:19'] },
@@ -43,6 +55,94 @@ describe('visible Doudian parent and merchandise rows', () => {
     assert.equal(result.lines.length, 1)
     assert.equal(result.lines[0].color, '肤色+黑色')
     assert.equal(result.lines[0].size, 'M')
+    assert.equal(result.lines[0].quantity, 1)
+  })
+
+  it('reads an explicit new colour and 4XL without guessing from the title', () => {
+    const result = parseVisibleRows([
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '稻草人保暖裤【单裤】花驼灰/4XL(男180-200斤) x1 商品单 2234567890123456789',
+        '¥99 x1', '-', '待发货'] },
+    ])
+    assert.equal(result.lines[0].color, '花驼灰')
+    assert.equal(result.lines[0].size, '4XL')
+    assert.equal(result.lines[0].quantity, 1)
+  })
+
+  it('does not treat an unmarked title fragment as a new colour', () => {
+    const result = parseVisibleRows([
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '商品标题花驼灰/4XL x1 商品单 2234567890123456789', '¥99 x1', '-', '待发货'] },
+    ])
+    assert.equal(result.lines[0].color, null)
+    assert.ok(result.lines[0].issues.includes('无法确认颜色或尺码'))
+  })
+
+  it('accepts a new standalone colour and size without configuring either value', () => {
+    const result = parseVisibleRows([
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '新款外套【加绒】雾松绿/5XL x2 商家编码:NEW_CODE-82 商品单 2234567890123456789',
+        '¥89 x2', '-', '待发货'] },
+    ])
+    assert.equal(result.lines[0].merchantCode, 'NEW_CODE-82')
+    assert.equal(result.lines[0].color, '雾松绿')
+    assert.equal(result.lines[0].size, '5XL')
+    assert.equal(result.lines[0].quantity, 2)
+  })
+
+  it('uses explicit field labels for unfamiliar values and leaves numeric ambiguity for review', () => {
+    const rows = [
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '童装 颜色:月影蓝 尺码:加大号 x1 商品单 2234567890123456789', '¥89 x1', '-', '待发货'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '童装【新款】02/42 x1 商品单 3234567890123456789', '¥89 x1', '-', '待发货'] },
+    ]
+    const result = parseVisibleRows(rows)
+    assert.equal(result.lines[0].color, '月影蓝')
+    assert.equal(result.lines[0].size, '加大号')
+    assert.equal(result.lines[1].color, null)
+    assert.ok(result.lines[1].issues.includes('无法确认颜色或尺码'))
+    assert.ok(result.lines[1].productName.includes('02/42'))
+  })
+
+  it('keeps an absent merchant code blank and preserves a new two-colour variant', () => {
+    const result = parseVisibleRows([
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '新品【双件】雾松绿+月影蓝/110cm x1 商品单 2234567890123456789',
+        '¥89 x1', '-', '待发货'] },
+    ])
+    assert.equal(result.lines[0].merchantCode, null)
+    assert.equal(result.lines[0].color, '雾松绿+月影蓝')
+    assert.equal(result.lines[0].size, '110cm')
+    assert.equal(result.lines[0].quantity, 1)
+  })
+
+  it('uses a numbered style boundary for an unfamiliar colour joined to a title', () => {
+    const result = parseVisibleRows([
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '男款正肩短袖T-09巧克力色/3XL(160-180斤) x1 商品单 2234567890123456789',
+        '¥89 x1', '-', '待发货'] },
+    ])
+    assert.equal(result.lines[0].color, '巧克力色')
+    assert.equal(result.lines[0].size, '3XL')
+  })
+
+  it('keeps an untyped style specification intact without calling it a colour', () => {
+    const result = parseVisibleRows([
+      { className: 'auxo-table-row-level-0', cells: ['', '订单编号 1234567890123456789'] },
+      { className: 'auxo-table-row-level-1', cells: ['',
+        '保暖情侣套装-156女-鸿运套装/2XL(140-160斤) x1 商品单 2234567890123456789',
+        '¥89 x1', '-', '待发货'] },
+    ])
+    assert.equal(result.lines[0].color, '女-鸿运套装')
+    assert.equal(result.lines[0].size, '2XL')
+    assert.equal(result.lines[0].variantRole, 'raw_spec')
     assert.equal(result.lines[0].quantity, 1)
   })
 })

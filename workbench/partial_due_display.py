@@ -1,8 +1,23 @@
 """Render a verified subset of the pending-page candidate separately from published snapshots."""
 import html
 import json
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+
+def size_sort_key(value):
+    normalized = value.upper()
+    order = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4}
+    if normalized in order:
+        return (0, order[normalized])
+    match = re.fullmatch(r"(\d{1,2})XL", normalized)
+    if match:
+        return (0, 3 + int(match.group(1)))
+    match = re.fullmatch(r"(\d{2,3})(?:CM|厘米|码)", normalized)
+    if match:
+        return (1, int(match.group(1)))
+    return (2, normalized)
 
 
 def render_partial_due(path):
@@ -31,26 +46,27 @@ def render_partial_due(path):
         if not rows or len(ids) != len(set(ids)):
             return ""
         groups = {}
-        preferred = ("M", "L", "XL", "2XL", "3XL")
-        sizes = set(preferred)
+        sizes = set()
         for row in rows:
             code, product_id, name = (str(row[k]) for k in ("merchant_code", "product_id", "product_name"))
             color, size, qty = str(row["color"]), str(row["size"]), int(row["quantity"])
             if not product_id.isdigit() or not name or not color or not size or qty < 1:
                 return ""
-            group = groups.setdefault((product_id, code, name, color), {"sizes": {}, "children": 0})
+            role = str(row.get("variant_role") or "color")
+            group = groups.setdefault((product_id, code, name, color, role), {"sizes": {}, "children": 0})
             group["sizes"][size] = group["sizes"].get(size, 0) + qty
             group["children"] += 1
             sizes.add(size)
-        columns = [*preferred, *sorted(sizes - set(preferred))]
+        columns = sorted(sizes, key=size_sort_key)
         escape = lambda value: html.escape(str(value), quote=True)
         head = "".join(f"<th>{escape(size)}</th>" for size in columns)
         body = ""
-        for (product_id, code, name, color), group in sorted(groups.items()):
+        for (product_id, code, name, color, role), group in sorted(groups.items()):
             label = code if code else name
             source = "商家编码" if code else "商家编码未填写；按商品名称展示"
+            variant = ("原规格：" if role == "raw_spec" else "") + color
             cells = "".join(f"<td>{group['sizes'].get(size, 0) or '—'}</td>" for size in columns)
-            body += (f"<tr><td>{escape(label)} · {escape(color)}<br><small>{escape(source)}｜"
+            body += (f"<tr><td>{escape(label)} · {escape(variant)}<br><small>{escape(source)}｜"
                      f"商品ID：{escape(product_id)}</small></td>{cells}"
                      f"<td>{sum(group['sizes'].values())}</td><td>{group['children']}</td></tr>")
         source_quantity = sum(int(row["quantity"]) for row in rows)
@@ -72,7 +88,7 @@ def render_partial_due(path):
                 f"{escape(candidate.get('displayed_parent_count'))} 个；{escape(note)}"
                 "组合款按原规格显示两个颜色；未将源订单数量乘以二。"
                 "这是读取时点的快照，不代表实时同步。</p>"
-                f"<table><tr><th>商家编码或商品名称 · 颜色</th>{head}<th>源订单数量</th>"
+                f"<table><tr><th>商家编码或商品名称 · 颜色/款式/原规格</th>{head}<th>源订单数量</th>"
                 f"<th>商品子订单</th></tr>{body}</table></section>")
     except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
         return ""
