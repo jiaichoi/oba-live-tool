@@ -2,7 +2,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, WebContentsView, dialog, ipcMain, shell } from 'electron'
 import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { emitter } from './event/eventBus'
 import { updateManager } from './managers/UpdateManager'
@@ -70,8 +70,6 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
   ? path.join(process.env.APP_ROOT, 'public')
   : RENDERER_DIST
 
-app.commandLine.appendSwitch('remote-debugging-port', '9222')
-
 // Disable GPU Acceleration for Windows 7
 if (os.release().startsWith('6.1')) app.disableHardwareAcceleration()
 
@@ -84,12 +82,94 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 let win: BrowserWindow | null = null
+let workbenchView: WebContentsView | null = null
+let workbenchVisible = false
+let lastWorkbenchRequestKey = ''
 const preload = path.join(__dirname, '../preload/index.mjs')
 const indexHtml = path.join(RENDERER_DIST, 'index.html')
+const configuredPort = Number(process.env.TUTIANDUO_PORT || 8765)
+const workbenchPort = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535
+  ? configuredPort : 8765
+const workbenchOrigin = `http://127.0.0.1:${workbenchPort}`
+const workbenchPages = new Set([
+  '/', '/due', '/shipped', '/sales', '/stock', '/history', '/history-sku', '/imports', '/import',
+])
+
+function showWorkbench(bounds: { x: number; y: number; width: number; height: number; viewportWidth: number; path: string; requestKey: string; preservePath?: string }) {
+  if (!win || win.isDestroyed()) return
+  const [contentWidth, contentHeight] = win.getContentSize()
+  const values = [bounds.x, bounds.y, bounds.width, bounds.height, bounds.viewportWidth]
+  if (!values.every(value => Number.isFinite(value) && Number.isInteger(value))) return
+  if (bounds.x < 0 || bounds.y < 0 || bounds.width < 1 || bounds.height < 1 || bounds.viewportWidth < 1) return
+  if (!workbenchPages.has(bounds.path)) return
+  // Renderer CSS pixels can differ from BrowserWindow content coordinates when
+  // the user has zoomed the UI. Scale the native child view into the same space.
+  const scale = contentWidth / bounds.viewportWidth
+  const x = Math.round(bounds.x * scale)
+  const y = Math.round(bounds.y * scale)
+  if (x >= contentWidth || y >= contentHeight) return
+  const visibleBounds = { x, y,
+    width: Math.min(Math.max(1, Math.round(bounds.width * scale)), contentWidth - x),
+    height: Math.min(Math.max(1, Math.round(bounds.height * scale)), contentHeight - y) }
+
+  if (!workbenchView) {
+    workbenchView = new WebContentsView({
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    })
+    workbenchView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    workbenchView.webContents.on('will-navigate', (event, url) => {
+      if (!url.startsWith(`${workbenchOrigin}/`)) event.preventDefault()
+    })
+    workbenchView.webContents.on('did-finish-load', () => {
+      void workbenchView?.webContents.insertCSS('.sidebar{display:none!important}.app-shell{display:block!important}')
+    })
+    workbenchView.webContents.on('did-navigate', (_event, url) => {
+      if (!url.startsWith(`${workbenchOrigin}/`)) return
+      win?.webContents.send(IPC_CHANNELS.workbench.navigated, { path: new URL(url).pathname })
+    })
+    void workbenchView.webContents.loadURL(`${workbenchOrigin}${bounds.path}`).catch(error => {
+      createLogger('workbench').warn('本机订单服务尚不可用', error)
+    })
+  } else if (bounds.requestKey !== lastWorkbenchRequestKey) {
+    const currentUrl = workbenchView.webContents.getURL()
+    const currentPath = currentUrl.startsWith(`${workbenchOrigin}/`) ? new URL(currentUrl).pathname : ''
+    if (currentPath !== bounds.path && currentPath !== bounds.preservePath) {
+      void workbenchView.webContents.loadURL(`${workbenchOrigin}${bounds.path}`).catch(error => {
+        createLogger('workbench').warn('本机订单页面尚不可用', error)
+      })
+    }
+  }
+  lastWorkbenchRequestKey = bounds.requestKey
+  if (!workbenchVisible) {
+    win.contentView.addChildView(workbenchView)
+    workbenchVisible = true
+  }
+  workbenchView.setBounds(visibleBounds)
+}
+
+ipcMain.handle(IPC_CHANNELS.workbench.show, (event, bounds) => {
+  if (event.sender !== win?.webContents) return
+  showWorkbench(bounds)
+})
+
+ipcMain.handle(IPC_CHANNELS.workbench.hide, (event, requestKey: string) => {
+  if (event.sender !== win?.webContents || !win || !workbenchView || !workbenchVisible ||
+      requestKey !== lastWorkbenchRequestKey) return
+  win.contentView.removeChildView(workbenchView)
+  workbenchVisible = false
+})
+
+ipcMain.handle(IPC_CHANNELS.workbench.reloadDue, event => {
+  if (event.sender !== win?.webContents || !workbenchView) return false
+  const current = workbenchView.webContents.getURL()
+  if (!current.startsWith(`${workbenchOrigin}/due`)) return false
+  workbenchView.webContents.reload()
+  return true
+})
 
 async function createWindow() {
   win = new BrowserWindow({
-    title: `OBA 直播工具 - v${app.getVersion()}`,
+    title: `线上经营工具 - v${app.getVersion()}`,
     width: 1280,
     height: 800,
     autoHideMenuBar: app.isPackaged,
@@ -106,6 +186,11 @@ async function createWindow() {
   })
 
   windowManager.setMainWindow(win)
+  win.on('closed', () => {
+    workbenchView = null
+    workbenchVisible = false
+    lastWorkbenchRequestKey = ''
+  })
 
   if (VITE_DEV_SERVER_URL) {
     // #298

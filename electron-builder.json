@@ -1,6 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "com.qbw.obalivetool",
+  "productName": "线上经营工具",
   "asar": true,
   "directories": {
     "output": "release/${version}"

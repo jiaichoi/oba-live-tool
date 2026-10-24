@@ -131,6 +131,103 @@ export interface IpcChannels {
 
   [IPC_CHANNELS.account.switch]: (params: { account: Account }) => void
 
+  [IPC_CHANNELS.workbench.show]: (bounds: {
+    x: number
+    y: number
+    width: number
+    height: number
+    viewportWidth: number
+    path: string
+    requestKey: string
+    preservePath?: string
+  }) => void
+  [IPC_CHANNELS.workbench.hide]: (requestKey: string) => void
+  [IPC_CHANNELS.workbench.reloadDue]: () => Promise<boolean>
+  [IPC_CHANNELS.workbench.navigated]: (location: { path: string }) => void
+  [IPC_CHANNELS.orderExport.open]: (accountId: string, chromePath?: string) => Promise<{
+    accountId: string
+    phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
+    message: string
+    updatedAt: string
+  }>
+  [IPC_CHANNELS.orderExport.close]: (accountId: string) => Promise<{
+    accountId: string
+    phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
+    message: string
+    updatedAt: string
+  }>
+  [IPC_CHANNELS.orderExport.check]: (accountId: string) => Promise<{
+    accountId: string
+    phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
+    message: string
+    updatedAt: string
+  }>
+  [IPC_CHANNELS.orderExport.probeOrderPage]: (accountId: string) => Promise<{
+    ok: boolean
+    message: string
+    observedAt: string
+    sourceUrl: string | null
+    hasRecentPartition: boolean
+    hasOlderPartition: boolean
+    hasPendingFilter: boolean
+    visiblePendingMainOrderCount: number | null
+    domHints?: string[]
+  }>
+  [IPC_CHANNELS.orderExport.capturePendingRows]: (accountId: string) => Promise<{
+    ok: boolean
+    message: string
+    localPath?: string
+    parents?: number
+    lines?: number
+    pages?: number[]
+    issues?: string[]
+  }>
+  [IPC_CHANNELS.orderExport.organizePending]: (accountId: string) => Promise<{
+    ok: boolean
+    message: string
+    parents?: number
+    children?: number
+    quantity?: number
+    empty?: boolean
+    observedAt?: string
+  }>
+  [IPC_CHANNELS.orderExport.getStatus]: (accountId: string) => Promise<{
+    accountId: string
+    phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
+    message: string
+    updatedAt: string
+  }>
+  [IPC_CHANNELS.orderExport.status]: (status: {
+    accountId: string
+    phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
+    message: string
+    updatedAt: string
+  }) => void
+  [IPC_CHANNELS.orderExport.downloaded]: (result: {
+    accountId: string
+    ok: boolean
+    filename: string
+    savedAt: string
+    localPath: string
+    message: string
+  }) => void
+  [IPC_CHANNELS.orderSync.getStatus]: (accountId: string) => Promise<{
+    accountId: string
+    phase: 'idle' | 'verifying' | 'awaiting-verification' | 'failed' | 'current'
+    message: string
+    shopId: string | null
+    lastSuccessAt: string | null
+    updatedAt: string
+  } | null>
+  [IPC_CHANNELS.orderSync.status]: (status: {
+    accountId: string
+    phase: 'idle' | 'verifying' | 'awaiting-verification' | 'failed' | 'current'
+    message: string
+    shopId: string | null
+    lastSuccessAt: string | null
+    updatedAt: string
+  }) => void
+
   // Log
   [IPC_CHANNELS.log]: (message: LogMessage) => void
 }

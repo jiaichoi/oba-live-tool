@@ -23,6 +23,7 @@ import { createCommentListenerTask } from '#/tasks/CommentListenerTask'
 import type { ITask } from '#/tasks/ITask'
 import { createPinCommentTask } from '#/tasks/PinCommentTask'
 import { createSendBatchMessageTask } from '#/tasks/SendBatchMessageTask'
+import { orderSyncCoordinator } from '#/services/OrderSyncCoordinator'
 import windowManager from '#/windowManager'
 
 export class AccountSession {
@@ -31,7 +32,7 @@ export class AccountSession {
   private activeTasks: Map<LiveControlTask['type'], ITask> = new Map()
 
   constructor(
-    platformName: LiveControlPlatform,
+    private platformName: LiveControlPlatform,
     private account: Account,
     private logger = createLogger(`@${account.name}`),
   ) {
@@ -53,6 +54,9 @@ export class AccountSession {
 
     // 登录成功之后马上先保存一次登录状态，确保后续发生意外后不用重新登录
     windowManager.send(IPC_CHANNELS.chrome.saveState, this.account.id, state)
+    if (this.platformName === 'douyin') {
+      orderSyncCoordinator.onAuthenticated(this.account.id)
+    }
 
     // 此时可以确保正在中控台页面，获取用户名
     // 获取用户名不应该和连接中控台的行为冲突
@@ -84,6 +88,9 @@ export class AccountSession {
 
   disconnect() {
     this.logger.warn('与中控台断开连接')
+    if (this.platformName === 'douyin') {
+      orderSyncCoordinator.cancel(this.account.id)
+    }
     // 通过程序关闭浏览器（并非多余的操作，因为 MacOS 的 context 关闭时不会关闭浏览器进程）
     this.browserSession?.browser.close().catch(e => this.logger.error('无法关闭浏览器：', e))
     // 关闭所有正在进行的任务

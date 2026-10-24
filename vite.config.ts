@@ -1,4 +1,3 @@
-import { rmSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import tailwindcss from '@tailwindcss/vite'
@@ -9,13 +8,12 @@ import pkg from './package.json'
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command }) => {
-  rmSync('dist-electron', { recursive: true, force: true })
-
   const isServe = command === 'serve'
   const isBuild = command === 'build'
   const sourcemap = isServe || !!process.env.VSCODE_DEBUG
 
   return {
+    build: { emptyOutDir: false },
     resolve: {
       alias: {
         '@': path.join(__dirname, 'src'),
@@ -38,6 +36,7 @@ export default defineConfig(({ command }) => {
           },
           vite: {
             build: {
+              emptyOutDir: false,
               sourcemap: true,
               minify: false, // 开启前后差距大概 100kb
               outDir: 'dist-electron/main',
@@ -65,6 +64,7 @@ export default defineConfig(({ command }) => {
           input: 'electron/preload/index.ts',
           vite: {
             build: {
+              emptyOutDir: false,
               sourcemap: sourcemap ? 'inline' : undefined, // #332
               minify: isBuild,
               outDir: 'dist-electron/preload',

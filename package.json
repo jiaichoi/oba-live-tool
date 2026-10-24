@@ -1,9 +1,9 @@
 {
   "name": "oba-live-tool",
   "type": "module",
-  "version": "1.6.3",
+  "version": "1.0.0",
   "private": true,
-  "description": "直播工具，用于直播带货，能自动弹窗，自动发言",
+  "description": "线上经营工具，整合店铺订单工作台与直播运营功能",
   "author": "qiutongxue",
   "license": "MIT",
   "main": "dist-electron/main/index.js",

@@ -68,6 +68,27 @@ export const IPC_CHANNELS = {
   account: {
     switch: 'account:switch',
   },
+  workbench: {
+    show: 'workbench:show',
+    hide: 'workbench:hide',
+    navigated: 'workbench:navigated',
+    reloadDue: 'workbench:reloadDue',
+  },
+  orderExport: {
+    open: 'orderExport:open',
+    close: 'orderExport:close',
+    check: 'orderExport:check',
+    probeOrderPage: 'orderExport:probeOrderPage',
+    capturePendingRows: 'orderExport:capturePendingRows',
+    organizePending: 'orderExport:organizePending',
+    getStatus: 'orderExport:getStatus',
+    status: 'orderExport:status',
+    downloaded: 'orderExport:downloaded',
+  },
+  orderSync: {
+    getStatus: 'orderSync:getStatus',
+    status: 'orderSync:status',
+  },
   log: 'log',
   app: {
     openLogFolder: 'app:openLogFolder',
