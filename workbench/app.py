@@ -45,7 +45,7 @@ PRODUCT_COLORS = ("中花灰", "黑灰", "深灰", "浅灰", "宝蓝", "黑色",
                   "灰色", "橙黄", "焦糖", "豆沙", "花芋粉", "花金咖", "花兰紫",
                   "竹青绿", "嫣粉", "铂灰", "月白蓝", "贝壳粉")
 OPEN_STATUSES = ("备货中", "待发货", "部分发货")
-MATRIX_SIZES = ("M", "L", "XL", "2XL", "3XL")
+MATRIX_SIZES = ("M", "L", "XL", "2XL", "3XL", "4XL")
 FORM_NONCE = secrets.token_urlsafe(32)
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_CSV_BYTES = 50 * 1024 * 1024
@@ -997,7 +997,8 @@ class Handler(BaseHTTPRequestHandler):
                        "displayed_parent_count": candidate.get("displayed_parent_count"),
                        "rows": [{key: row.get(key) for key in
                                  ("shop_order_id", "sku_order_id", "merchant_code", "product_id",
-                                  "product_name", "color", "size", "quantity")}
+                                  "product_name", "color", "size", "quantity",
+                                  "variant_role", "variant_review_reason")}
                                 for row in candidate["rows"]]}
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(200)

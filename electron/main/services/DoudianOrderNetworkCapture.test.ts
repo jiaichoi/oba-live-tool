@@ -11,3 +11,15 @@ it('retains order fields without buyer contacts or auth material', () => {
   for (const secret of ['13800138000', 'receiverAddress', 'accessToken', 'private'])
     assert.equal(JSON.stringify(cleaned).includes(secret), false)
 })
+
+it('retains only named SKU property values inside specification objects', () => {
+  const cleaned = sanitizeOrderResponse({ data: [{ product_item: [{
+    sku_properties: [{ name: '颜色分类', value: '雾松绿', buyerPhone: '13800138000' }],
+    receiver_name: 'Private Person', note: 'private',
+  }] }] })
+  const serialized = JSON.stringify(cleaned)
+  assert.ok(serialized.includes('雾松绿'))
+  assert.ok(serialized.includes('颜色分类'))
+  assert.ok(!serialized.includes('13800138000'))
+  assert.ok(!serialized.includes('Private Person'))
+})

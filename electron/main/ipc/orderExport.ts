@@ -7,7 +7,7 @@ import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
 import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
-import { capturePendingOrderPages, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
+import { capturePendingOrderPages, parseStructuredVariant, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import windowManager from '../windowManager'
 
@@ -25,6 +25,7 @@ const organizing = new Set<string>()
 
 type OrganizedRow = { shop_order_id: string; sku_order_id: string; product_id: string;
   product_name: string; merchant_code: string; color: string; size: string;
+  variant_role: 'color' | 'raw_spec'; variant_review_reason: string;
   quantity: number; source_spec: string; status: string }
 
 export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetworkEvidence[]): OrganizedRow[] {
@@ -36,7 +37,8 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
     if (!partition.emptyStateConfirmed || partition.issues.length) throw new Error('0单未通过空表状态核对')
     return []
   }
-  const products = new Map<string, { product_id: string; product_name: string; merchant_sku_code: string }>()
+  const products = new Map<string, { product_id: string; product_name: string; merchant_sku_code: string;
+    variant: { color: string; size: string; role: 'color' | 'raw_spec' } | null }>()
   for (const response of evidence) {
     if (!response.path.endsWith('/api/order/searchlist')) continue
     const data = (response.fields as { data?: unknown }).data
@@ -53,31 +55,44 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
         const key = `${parentId}:${childId}`
         if (products.has(key)) continue
         products.set(key, { product_id: String(item.product_id ?? ''),
-          product_name: String(item.product_name ?? ''), merchant_sku_code: String(item.merchant_sku_code ?? '') })
+          product_name: String(item.product_name ?? ''), merchant_sku_code: String(item.merchant_sku_code ?? ''),
+          variant: parseStructuredVariant(item) })
       }
     }
   }
   const lines = partition.pages.flatMap(page => page.lines)
+  if (products.size === 0) throw new Error('本次未捕获可核验的官方待发货商品列表响应')
   const rows: OrganizedRow[] = []
   const seen = new Set<string>()
+  let missingSpecification = 0
+  let missingQuantity = 0
   for (const line of lines) {
     const childId = String(line.skuOrderId ?? '').slice(0, 19)
     const key = `${line.parentId}:${childId}`
     const item = products.get(key)
     // The shop sometimes renders an ancillary consumer remark as a duplicate row.
-    if (!item || !line.color || !line.size || !Number.isInteger(line.quantity) || (line.quantity ?? 0) < 1) continue
+    if (!item) continue
+    if (item.variant && line.color && line.size &&
+        (item.variant.color !== line.color || item.variant.size.toUpperCase() !== line.size.toUpperCase()))
+      throw new Error('官方商品规格与页面商品行不一致；旧快照未改动')
+    const variant = item.variant ?? (line.color && line.size ? { color: line.color, size: line.size,
+      role: line.variantRole ?? 'raw_spec' } : null)
+    if (!variant) { missingSpecification++; continue }
+    if (!Number.isInteger(line.quantity) || (line.quantity ?? 0) < 1) { missingQuantity++; continue }
     if (seen.has(key)) throw new Error('同一商品子订单存在多条有效商品行')
     if (!/^待发货/.test(line.orderStatus) || !/^\d+$/.test(item.product_id) || !item.product_name)
       throw new Error('商品状态或身份未核实')
     seen.add(key)
     rows.push({ shop_order_id: line.parentId, sku_order_id: childId,
       product_id: item.product_id, product_name: item.product_name,
-      merchant_code: item.merchant_sku_code, color: line.color, size: line.size,
+      merchant_code: item.merchant_sku_code, color: variant.color, size: variant.size,
+      variant_role: variant.role,
+      variant_review_reason: variant.role === 'color' ? '' : '平台未标注颜色或款式类型；按原始规格展示',
       quantity: line.quantity!, source_spec: line.productName, status: '待发货' })
   }
   if (rows.length !== products.size || new Set(rows.map(row => row.shop_order_id)).size !== partition.displayedPendingCount ||
       partition.pages.reduce((sum, page) => sum + page.parentCount, 0) !== partition.displayedPendingCount)
-    throw new Error('页面商品行与官方列表响应未能逐项对应')
+    throw new Error(`页面商品行与官方列表响应未能逐项对应：页面主订单 ${partition.displayedPendingCount}、官方商品子订单 ${products.size}、成功对应 ${rows.length}、规格待核 ${missingSpecification}、数量待核 ${missingQuantity}`)
   return rows
 }
 
@@ -96,6 +111,15 @@ async function publishOrganized(capture: PendingOrderCapture, rows: OrganizedRow
   if (await stat(target).then(() => true).catch(() => false))
     await copyFile(target, path.join(data, `partial_due.before_${Date.now()}.json`))
   await rename(temporary, target)
+}
+
+async function saveReviewCandidate(accountId: string, capture: PendingOrderCapture, networkEvidence: OrderNetworkEvidence[]) {
+  const inbox = path.join(app.getPath('userData'), 'OrderReports', accountId)
+  await mkdir(inbox, { recursive: true, mode: 0o700 })
+  const localPath = path.join(inbox, `${randomUUID()}_pending-page-candidate.json`)
+  await writeFile(localPath, JSON.stringify({ ...capture, networkEvidence }), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+  await chmod(localPath, 0o600)
+  return localPath
 }
 
 function publish(accountId: string, phase: Phase, message: string) {
@@ -229,11 +253,7 @@ export function setupOrderExportIpcHandlers() {
     try {
       const capture = await capturePendingOrderPages(page)
       const networkEvidence = await stopObserving()
-      const inbox = path.join(app.getPath('userData'), 'OrderReports', accountId)
-      await mkdir(inbox, { recursive: true, mode: 0o700 })
-      const localPath = path.join(inbox, `${randomUUID()}_pending-page-candidate.json`)
-      await writeFile(localPath, JSON.stringify({ ...capture, networkEvidence }), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-      await chmod(localPath, 0o600)
+      const localPath = await saveReviewCandidate(accountId, capture, networkEvidence)
       const parents = capture.partitions.reduce((n, part) => n + part.pages.reduce((m, current) => m + current.parentCount, 0), 0)
       const lines = capture.partitions.reduce((n, part) => n + part.pages.reduce((m, current) => m + current.lines.length, 0), 0)
       return { ok: true, message: '候选订单行已只读保存到本机；尚未核实并发布为工作台快照。',
@@ -263,7 +283,12 @@ export function setupOrderExportIpcHandlers() {
         .waitFor({ state: 'visible', timeout: 30000 })
       const capture = await capturePendingOrderPages(page)
       const evidence = await stopObserving()
-      const rows = organizedRows(capture, evidence)
+      let rows: OrganizedRow[]
+      try { rows = organizedRows(capture, evidence) }
+      catch (error) {
+        const localPath = await saveReviewCandidate(accountId, capture, evidence)
+        throw new Error(`${error instanceof Error ? error.message : '未知错误'}；原始商品规格与待核原因已保存在本机 ${localPath}`)
+      }
       await publishOrganized(capture, rows)
       const parents = new Set(rows.map(row => row.shop_order_id)).size
       return { ok: true, parents, children: rows.length,

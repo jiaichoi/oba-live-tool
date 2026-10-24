@@ -2,10 +2,13 @@
 
 import csv
 import io
+import json
 import sqlite3
 import unittest
+from types import SimpleNamespace
 
 from workbench import app
+from workbench.partial_due_display import render_partial_due
 
 
 FIELDS = ["主订单编号", "子订单编号", "选购商品", "商家编码", "商品数量", "订单状态",
@@ -93,6 +96,34 @@ class SnapshotSafetyTest(unittest.TestCase):
         _, groups, _ = app.size_matrix(rows)
         self.assertEqual(groups[("123456", "TEST-1480", "黑色")]["sizes"], {"L": 2, "XL": 1})
         self.assertEqual(groups[("654321", "TEST-1480", "黑色")]["sizes"], {"L": 1})
+
+    def test_four_xl_is_a_matrix_column(self):
+        app.import_doudian_csv(report(order("S1", size="4XL")), "123456")
+        sizes, groups, _ = app.size_matrix(app.open_snapshot_orders())
+        self.assertIn("4XL", sizes)
+        self.assertEqual(groups[("123456", "TEST-1480", "黑色")]["sizes"], {"4XL": 1})
+
+    def test_partial_matrix_keeps_new_codes_and_products_separate(self):
+        candidate = {"scope": "recent_6_months_pending", "page_complete": True,
+                     "displayed_parent_count": 3, "observed_at": "2026-10-24T12:00:00+08:00",
+                     "rows": [
+                         dict(shop_order_id="P1", sku_order_id="S1", merchant_code="NEW-1",
+                              product_id="1001", product_name="甲", color="雾松绿", size="5XL", quantity=2),
+                         dict(shop_order_id="P2", sku_order_id="S2", merchant_code="NEW-1",
+                              product_id="1002", product_name="乙", color="雾松绿", size="XS", quantity=1),
+                         dict(shop_order_id="P3", sku_order_id="S3", merchant_code="",
+                              product_id="1003", product_name="丙", color="月影蓝", size="加大号", quantity=1),
+                     ]}
+        source = SimpleNamespace(is_file=lambda: True,
+                                 read_text=lambda **_: json.dumps(candidate, ensure_ascii=False))
+        rendered = render_partial_due(source)
+        self.assertIn("NEW-1", rendered)
+        self.assertIn("丙", rendered)
+        self.assertIn("商家编码未填写", rendered)
+        self.assertLess(rendered.index("<th>XS</th>"), rendered.index("<th>5XL</th>"))
+        self.assertIn("<th>加大号</th>", rendered)
+        self.assertIn("商品ID：1001", rendered)
+        self.assertIn("商品ID：1002", rendered)
 
     def test_direct_pages_publish_only_after_both_partitions_match(self):
         evidence = direct_evidence(("S1", "L"), ("S2", "XL"))

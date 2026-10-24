@@ -5,10 +5,10 @@ const BLOCKED_FIELD = /buyer|customer|receiver|address|phone|mobile|telephone|co
 
 export type OrderNetworkEvidence = { path: string; observedAt: string; fields: unknown }
 
-export function sanitizeOrderResponse(value: unknown, depth = 0): unknown {
+export function sanitizeOrderResponse(value: unknown, depth = 0, inSpecification = false): unknown {
   if (depth > 12 || value === null) return undefined
   if (Array.isArray(value)) {
-    const items = value.slice(0, 500).map(item => sanitizeOrderResponse(item, depth + 1)).filter(item => item !== undefined)
+    const items = value.slice(0, 500).map(item => sanitizeOrderResponse(item, depth + 1, inSpecification)).filter(item => item !== undefined)
     return items.length ? items : undefined
   }
   if (typeof value !== 'object') return undefined
@@ -16,9 +16,10 @@ export function sanitizeOrderResponse(value: unknown, depth = 0): unknown {
   for (const [key, child] of Object.entries(value)) {
     if (BLOCKED_FIELD.test(key)) continue
     if (child && typeof child === 'object') {
-      const cleaned = sanitizeOrderResponse(child, depth + 1)
+      const cleaned = sanitizeOrderResponse(child, depth + 1, inSpecification || /(?:^|_)(?:spec|property|properties|attribute)(?:_|$)/i.test(key))
       if (cleaned !== undefined) output[key] = cleaned
-    } else if (ALLOWED_FIELD.test(key) && ['string', 'number', 'boolean'].includes(typeof child)) {
+    } else if ((ALLOWED_FIELD.test(key) || (inSpecification && /^(?:name|value|val|key|title)$/i.test(key))) &&
+               ['string', 'number', 'boolean'].includes(typeof child)) {
       output[key] = typeof child === 'string' ? child.slice(0, 500) : child
     }
   }
