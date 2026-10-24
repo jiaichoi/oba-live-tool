@@ -48,6 +48,7 @@ class BrowserSessionManager {
     const context = await browser.newContext({
       viewport: null, // 显式设置 null，关闭固定视口
       storageState,
+      acceptDownloads: true,
     })
     const page = await context.newPage()
     return { browser, context, page }

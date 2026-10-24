@@ -131,6 +131,23 @@ export interface IpcChannels {
 
   [IPC_CHANNELS.account.switch]: (params: { account: Account }) => void
 
+  [IPC_CHANNELS.workbench.show]: (bounds: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }) => void
+  [IPC_CHANNELS.workbench.hide]: () => void
+  [IPC_CHANNELS.orderExport.open]: () => Promise<{ ok: boolean; message: string }>
+  [IPC_CHANNELS.orderExport.close]: () => Promise<void>
+  [IPC_CHANNELS.orderExport.downloaded]: (result: {
+    ok: boolean
+    filename: string
+    savedAt: string
+    localPath: string
+    message: string
+  }) => void
+
   // Log
   [IPC_CHANNELS.log]: (message: LogMessage) => void
 }

@@ -43,3 +43,19 @@ coverage/
 
 .trae
 .claude
+
+# 土田朵订单工作台：只发布源码和合成样例
+workbench/data/
+workbench/test-sandbox-data/
+**/*.db
+**/*.db-*
+**/*.sqlite*
+**/*.zip
+**/*.xlsx
+**/*.xls
+**/.env.*
+**/Session Storage/
+**/Local Storage/
+**/*storage-state*.json
+**/*.csv
+!workbench/sample_orders.csv

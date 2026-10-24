@@ -1,0 +1,13 @@
+{
+  "name": "OBA + 土田朵订单工作台开发",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
+  },
+  "forwardPorts": [18765],
+  "postCreateCommand": "npm install --ignore-scripts --no-audit --no-fund",
+  "remoteEnv": {
+    "TUTIANDUO_DATA_DIR": "${containerWorkspaceFolder}/workbench/test-sandbox-data",
+    "TUTIANDUO_PORT": "18765"
+  }
+}

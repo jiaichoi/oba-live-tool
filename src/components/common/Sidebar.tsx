@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router'
+import { ClipboardList, FolderDown } from 'lucide-react'
 import { abilities, autoReplyPlatforms } from '@/abilities'
 import { useCurrentAutoMessage } from '@/hooks/useAutoMessage'
 import { useCurrentAutoPopUp } from '@/hooks/useAutoPopUp'
@@ -32,8 +33,18 @@ export default function Sidebar() {
   const tabs: SidebarTab[] = [
     {
       id: '/',
+      name: '订单工作台',
+      icon: <ClipboardList className="w-5 h-5" />,
+    },
+    {
+      id: '/live-control',
       name: '打开中控台',
       icon: <CarbonContentDeliveryNetwork className="w-5 h-5" />,
+    },
+    {
+      id: '/order-export',
+      name: '订单报表下载',
+      icon: <FolderDown className="w-5 h-5" />,
     },
     {
       id: '/auto-message',

@@ -1,0 +1,3 @@
+shop_id,shop_order_id,sku_order_id,product_code,product_name,color,size,quantity,status,created_at,promised_ship_at,updated_at
+TEST_SHOP,TEST_PARENT_001,TEST_SKU_001,TEST-1480,测试羊毛裤,黑色,L,1,备货中,2026-10-22 09:00:00,2026-10-23 18:00:00,2026-10-22 09:00:00
+TEST_SHOP,TEST_PARENT_001,TEST_SKU_002,TEST-1480,测试羊毛裤,黑色,XL,2,备货中,2026-10-22 09:00:00,2026-10-23 18:00:00,2026-10-22 09:00:00

@@ -68,6 +68,15 @@ export const IPC_CHANNELS = {
   account: {
     switch: 'account:switch',
   },
+  workbench: {
+    show: 'workbench:show',
+    hide: 'workbench:hide',
+  },
+  orderExport: {
+    open: 'orderExport:open',
+    close: 'orderExport:close',
+    downloaded: 'orderExport:downloaded',
+  },
   log: 'log',
   app: {
     openLogFolder: 'app:openLogFolder',

@@ -2,7 +2,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, WebContentsView, dialog, ipcMain, shell } from 'electron'
 import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { emitter } from './event/eventBus'
 import { updateManager } from './managers/UpdateManager'
@@ -70,8 +70,6 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
   ? path.join(process.env.APP_ROOT, 'public')
   : RENDERER_DIST
 
-app.commandLine.appendSwitch('remote-debugging-port', '9222')
-
 // Disable GPU Acceleration for Windows 7
 if (os.release().startsWith('6.1')) app.disableHardwareAcceleration()
 
@@ -84,8 +82,52 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 let win: BrowserWindow | null = null
+let workbenchView: WebContentsView | null = null
+let workbenchVisible = false
 const preload = path.join(__dirname, '../preload/index.mjs')
 const indexHtml = path.join(RENDERER_DIST, 'index.html')
+const configuredPort = Number(process.env.TUTIANDUO_PORT || 8765)
+const workbenchPort = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535
+  ? configuredPort : 8765
+const workbenchOrigin = `http://127.0.0.1:${workbenchPort}`
+
+function showWorkbench(bounds: { x: number; y: number; width: number; height: number }) {
+  if (!win || win.isDestroyed()) return
+  const [contentWidth, contentHeight] = win.getContentSize()
+  const values = [bounds.x, bounds.y, bounds.width, bounds.height]
+  if (!values.every(value => Number.isFinite(value) && Number.isInteger(value))) return
+  if (bounds.x < 0 || bounds.y < 0 || bounds.width < 1 || bounds.height < 1) return
+  if (bounds.x + bounds.width > contentWidth || bounds.y + bounds.height > contentHeight) return
+
+  if (!workbenchView) {
+    workbenchView = new WebContentsView({
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    })
+    workbenchView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    workbenchView.webContents.on('will-navigate', (event, url) => {
+      if (!url.startsWith(`${workbenchOrigin}/`)) event.preventDefault()
+    })
+    void workbenchView.webContents.loadURL(`${workbenchOrigin}/due`).catch(error => {
+      createLogger('workbench').warn('本机订单服务尚不可用', error)
+    })
+  }
+  if (!workbenchVisible) {
+    win.contentView.addChildView(workbenchView)
+    workbenchVisible = true
+  }
+  workbenchView.setBounds(bounds)
+}
+
+ipcMain.handle(IPC_CHANNELS.workbench.show, (event, bounds) => {
+  if (event.sender !== win?.webContents) return
+  showWorkbench(bounds)
+})
+
+ipcMain.handle(IPC_CHANNELS.workbench.hide, event => {
+  if (event.sender !== win?.webContents || !win || !workbenchView || !workbenchVisible) return
+  win.contentView.removeChildView(workbenchView)
+  workbenchVisible = false
+})
 
 async function createWindow() {
   win = new BrowserWindow({
@@ -106,6 +148,10 @@ async function createWindow() {
   })
 
   windowManager.setMainWindow(win)
+  win.on('closed', () => {
+    workbenchView = null
+    workbenchVisible = false
+  })
 
   if (VITE_DEV_SERVER_URL) {
     // #298
