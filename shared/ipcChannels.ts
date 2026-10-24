@@ -71,6 +71,7 @@ export const IPC_CHANNELS = {
   workbench: {
     show: 'workbench:show',
     hide: 'workbench:hide',
+    navigated: 'workbench:navigated',
   },
   orderExport: {
     open: 'orderExport:open',

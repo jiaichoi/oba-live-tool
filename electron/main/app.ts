@@ -84,20 +84,25 @@ if (!app.requestSingleInstanceLock()) {
 let win: BrowserWindow | null = null
 let workbenchView: WebContentsView | null = null
 let workbenchVisible = false
+let lastWorkbenchRequestKey = ''
 const preload = path.join(__dirname, '../preload/index.mjs')
 const indexHtml = path.join(RENDERER_DIST, 'index.html')
 const configuredPort = Number(process.env.TUTIANDUO_PORT || 8765)
 const workbenchPort = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535
   ? configuredPort : 8765
 const workbenchOrigin = `http://127.0.0.1:${workbenchPort}`
+const workbenchPages = new Set([
+  '/', '/due', '/shipped', '/sales', '/stock', '/history', '/history-sku', '/imports', '/import',
+])
 
-function showWorkbench(bounds: { x: number; y: number; width: number; height: number }) {
+function showWorkbench(bounds: { x: number; y: number; width: number; height: number; path: string; requestKey: string; preservePath?: string }) {
   if (!win || win.isDestroyed()) return
   const [contentWidth, contentHeight] = win.getContentSize()
   const values = [bounds.x, bounds.y, bounds.width, bounds.height]
   if (!values.every(value => Number.isFinite(value) && Number.isInteger(value))) return
   if (bounds.x < 0 || bounds.y < 0 || bounds.width < 1 || bounds.height < 1) return
   if (bounds.x + bounds.width > contentWidth || bounds.y + bounds.height > contentHeight) return
+  if (!workbenchPages.has(bounds.path)) return
 
   if (!workbenchView) {
     workbenchView = new WebContentsView({
@@ -107,10 +112,26 @@ function showWorkbench(bounds: { x: number; y: number; width: number; height: nu
     workbenchView.webContents.on('will-navigate', (event, url) => {
       if (!url.startsWith(`${workbenchOrigin}/`)) event.preventDefault()
     })
-    void workbenchView.webContents.loadURL(`${workbenchOrigin}/due`).catch(error => {
+    workbenchView.webContents.on('did-finish-load', () => {
+      void workbenchView?.webContents.insertCSS('.sidebar{display:none!important}.app-shell{display:block!important}')
+    })
+    workbenchView.webContents.on('did-navigate', (_event, url) => {
+      if (!url.startsWith(`${workbenchOrigin}/`)) return
+      win?.webContents.send(IPC_CHANNELS.workbench.navigated, { path: new URL(url).pathname })
+    })
+    void workbenchView.webContents.loadURL(`${workbenchOrigin}${bounds.path}`).catch(error => {
       createLogger('workbench').warn('本机订单服务尚不可用', error)
     })
+  } else if (bounds.requestKey !== lastWorkbenchRequestKey) {
+    const currentUrl = workbenchView.webContents.getURL()
+    const currentPath = currentUrl.startsWith(`${workbenchOrigin}/`) ? new URL(currentUrl).pathname : ''
+    if (currentPath !== bounds.path && currentPath !== bounds.preservePath) {
+      void workbenchView.webContents.loadURL(`${workbenchOrigin}${bounds.path}`).catch(error => {
+        createLogger('workbench').warn('本机订单页面尚不可用', error)
+      })
+    }
   }
+  lastWorkbenchRequestKey = bounds.requestKey
   if (!workbenchVisible) {
     win.contentView.addChildView(workbenchView)
     workbenchVisible = true
@@ -151,6 +172,7 @@ async function createWindow() {
   win.on('closed', () => {
     workbenchView = null
     workbenchVisible = false
+    lastWorkbenchRequestKey = ''
   })
 
   if (VITE_DEV_SERVER_URL) {

@@ -136,8 +136,12 @@ export interface IpcChannels {
     y: number
     width: number
     height: number
+    path: string
+    requestKey: string
+    preservePath?: string
   }) => void
   [IPC_CHANNELS.workbench.hide]: () => void
+  [IPC_CHANNELS.workbench.navigated]: (location: { path: string }) => void
   [IPC_CHANNELS.orderExport.open]: () => Promise<{ ok: boolean; message: string }>
   [IPC_CHANNELS.orderExport.close]: () => Promise<void>
   [IPC_CHANNELS.orderExport.downloaded]: (result: {

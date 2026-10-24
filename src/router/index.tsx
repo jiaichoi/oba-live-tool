@@ -1,4 +1,4 @@
-import { createHashRouter } from 'react-router'
+import { createHashRouter, Navigate } from 'react-router'
 import AIChat from '@/pages/AIChat'
 import AutoMessage from '@/pages/AutoMessage'
 import AutoPopUp from '@/pages/AutoPopUp'
@@ -18,7 +18,43 @@ export const router = createHashRouter([
     children: [
       {
         path: '/',
-        element: <Workbench />,
+        element: <Navigate to="/orders/due" replace />,
+      },
+      {
+        path: '/orders/due',
+        element: <Workbench path="/due" />,
+      },
+      {
+        path: '/orders/shipped',
+        element: <Workbench path="/shipped" />,
+      },
+      {
+        path: '/orders/all',
+        element: <Workbench path="/" />,
+      },
+      {
+        path: '/sales/history',
+        element: <Workbench path="/sales" />,
+      },
+      {
+        path: '/sales/stock',
+        element: <Workbench path="/stock" />,
+      },
+      {
+        path: '/data/history',
+        element: <Workbench path="/history" />,
+      },
+      {
+        path: '/data/history-sku',
+        element: <Workbench path="/history-sku" />,
+      },
+      {
+        path: '/data/imports',
+        element: <Workbench path="/imports" />,
+      },
+      {
+        path: '/data/import',
+        element: <Workbench path="/import" />,
       },
       {
         path: '/live-control',

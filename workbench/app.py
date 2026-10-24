@@ -219,6 +219,19 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_historical_orders_created
             ON historical_orders(created_at, shop_id, sku_order_id);
+        CREATE TABLE IF NOT EXISTS historical_sku_order_lines (
+            shop_id TEXT NOT NULL, product_id TEXT NOT NULL,
+            parent_order_id TEXT NOT NULL, child_order_id TEXT NOT NULL,
+            variant_label TEXT NOT NULL DEFAULT '', size_detail_raw TEXT NOT NULL DEFAULT '',
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            order_status_raw TEXT NOT NULL DEFAULT '',
+            aftersale_status_raw TEXT NOT NULL DEFAULT '',
+            submitted_at TEXT NOT NULL DEFAULT '', paid_at TEXT NOT NULL DEFAULT '',
+            review_reason TEXT NOT NULL DEFAULT '', selection_raw TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(shop_id, product_id, child_order_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_historical_sku_paid
+            ON historical_sku_order_lines(shop_id, product_id, paid_at);
         CREATE TABLE IF NOT EXISTS sales_import_batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT, imported_at TEXT NOT NULL,
             source TEXT NOT NULL, row_count INTEGER NOT NULL, zero_days INTEGER NOT NULL
@@ -1011,7 +1024,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(layout("历史 SKU 子订单", body, True))
         if path == "/shipped":
             query = parse_qs(parsed.query)
-            day = query.get("day", [date.today().isoformat()])[0]
+            day = query.get("day", [beijing_day()])[0]
             try:
                 rows = shipped_orders(day)
             except ValueError:
@@ -1026,7 +1039,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/due":
             query = parse_qs(parsed.query)
             source_type = current_source(query)
-            day = query.get("day", [date.today().isoformat()])[0]
+            day = query.get("day", [beijing_day()])[0]
             try:
                 date.fromisoformat(day)
             except ValueError:
