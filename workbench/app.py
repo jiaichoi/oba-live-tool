@@ -19,7 +19,6 @@ import zipfile
 import getpass
 from datetime import date, datetime
 from http import HTTPStatus
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -45,7 +44,7 @@ PRODUCT_COLORS = ("中花灰", "黑灰", "深灰", "浅灰", "宝蓝", "黑色",
                   "竹青绿", "嫣粉", "铂灰", "月白蓝", "贝壳粉")
 OPEN_STATUSES = ("备货中", "待发货", "部分发货")
 MATRIX_SIZES = ("M", "L", "XL", "2XL", "3XL")
-SESSION_COOKIE_AGE = 10 * 365 * 24 * 3600
+FORM_NONCE = secrets.token_urlsafe(32)
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_CSV_BYTES = 50 * 1024 * 1024
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
@@ -510,55 +509,6 @@ def import_refund_sku_page_json(content):
     return len(dates), total_rows
 
 
-def admin_exists():
-    with connection() as db:
-        return db.execute("SELECT 1 FROM settings WHERE key='password_hash'").fetchone() is not None
-
-
-def set_password(password):
-    if len(password) < 12:
-        raise ValueError("密码至少 12 个字符")
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000)
-    with connection() as db:
-        db.execute("INSERT INTO settings(key,value) VALUES('password_hash',?)", (salt.hex() + ":" + digest.hex(),))
-
-
-def check_password(password):
-    with connection() as db:
-        row = db.execute("SELECT value FROM settings WHERE key='password_hash'").fetchone()
-    if not row:
-        return False
-    salt, expected = row["value"].split(":")
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 600_000)
-    return hmac.compare_digest(digest, bytes.fromhex(expected))
-
-
-def create_session():
-    token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
-    with connection() as db:
-        db.execute("INSERT INTO sessions(token_hash,created_at) VALUES(?,?)",
-                   (token_hash, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    return token
-
-
-def session_valid(token):
-    if not token or len(token) > 200:
-        return False
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    with connection() as db:
-        return db.execute("SELECT 1 FROM sessions WHERE token_hash=?", (token_hash,)).fetchone() is not None
-
-
-def revoke_session(token):
-    if token:
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        temporary_zip_forget(token_hash)
-        with connection() as db:
-            db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
-
-
 def validate_row(row, line):
     item = {key: (row.get(key) or "").strip() for key in FIELDS}
     if any(not item[key] for key in FIELDS):
@@ -852,9 +802,12 @@ def layout(title, body, logged=False):
         anchors = ''.join(f'<a href="{path}" class="{"active" if title in titles else ""}" {"aria-current=page" if title in titles else ""}>{name}</a>'
                           for path, name, titles in links)
         groups.append(f'<div class="nav-label">{label}</div>{anchors}')
-    nav = f'<nav aria-label="工作台导航">{"".join(groups)}<div class="nav-label">账户</div><a href="/logout">退出</a></nav>' if logged else ""
-    sidebar = f'<aside class="sidebar"><div class="brand">土田朵电商工作台<small>本地研发版 · V1.0</small></div>{nav}</aside>' if logged else ""
-    shell_class = "app-shell" if logged else ""
+    nav = f'<nav aria-label="工作台导航">{"".join(groups)}</nav>'
+    sidebar = f'<aside class="sidebar"><div class="brand">土田朵电商工作台<small>本地研发版 · V1.0</small></div>{nav}</aside>'
+    shell_class = "app-shell"
+    body = re.sub(r'(<form\b[^>]*\bmethod="post"[^>]*>)',
+                  lambda match: match.group(1) + f'<input type="hidden" name="_csrf" value="{FORM_NONCE}">',
+                  body, flags=re.IGNORECASE)
     return f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}｜土田朵电商订单管理系统 V1.0</title>{STYLE}<div class="{shell_class}">{sidebar}<div class="content"><header class="page-header"><h1>{esc(title)}</h1><p>土田朵电商订单管理系统 V1.0 · 研发版</p></header><main><p class="warn">本地研发原型｜支持手动导入抖店报表｜未连接抖店 API 或飞书</p>{body}</main></div></div></html>'
 
 
@@ -866,7 +819,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -879,22 +833,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
 
-    def authorized(self):
-        cookies = SimpleCookie()
-        try:
-            cookies.load(self.headers.get("Cookie", ""))
-            token = cookies["session"].value
-        except (KeyError, ValueError):
-            return False
-        return session_valid(token)
-
     def session_identity(self):
-        cookies = SimpleCookie()
-        cookies.load(self.headers.get("Cookie", ""))
-        token = cookies["session"].value
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+        # ZIP passwords remain in this process's memory only; there is no login session.
+        return hashlib.sha256(FORM_NONCE.encode("ascii")).hexdigest()
+
+    def valid_host(self):
+        return self.headers.get("Host", "") == f"127.0.0.1:{PORT}"
 
     def form(self):
+        if hasattr(self, "_parsed_form"):
+            return self._parsed_form
         size = int(self.headers.get("Content-Length", "0"))
         content_type = self.headers.get("Content-Type", "")
         limit = MAX_UPLOAD_BYTES if content_type.lower().startswith("multipart/form-data") else 1_000_000
@@ -902,24 +850,18 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请求为空或超过上传大小限制")
         body = self.rfile.read(size)
         if content_type.lower().startswith("multipart/form-data"):
-            return {key: [value] for key, value in parse_multipart_form(body, content_type).items()}
-        return parse_qs(body.decode("utf-8"), keep_blank_values=True)
+            self._parsed_form = {key: [value] for key, value in parse_multipart_form(body, content_type).items()}
+        else:
+            self._parsed_form = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        return self._parsed_form
 
     def do_GET(self):
+        if not self.valid_host():
+            return self.send_html("Invalid Host", 403)
         parsed = urlparse(self.path)
         path = parsed.path
-        if path == "/logout":
-            cookies = SimpleCookie()
-            cookies.load(self.headers.get("Cookie", ""))
-            if "session" in cookies:
-                revoke_session(cookies["session"].value)
-            return self.redirect("/login", "session=; HttpOnly; SameSite=Strict; Max-Age=0; Path=/")
-        if not admin_exists():
-            return self.send_html(layout("初始设置", '<section><h2>初始设置</h2><p>仅限本机管理员设置登录密码。</p><form method="post" action="/setup"><input type="password" name="password" minlength="12" required placeholder="至少 12 位密码"><button>设置密码</button></form></section>'))
-        if path == "/login":
-            return self.send_html(layout("登录", '<section><h2>管理员登录</h2><form method="post" action="/login"><input type="password" name="password" required><button>登录</button></form></section>'))
-        if not self.authorized():
-            return self.redirect("/login")
+        if path in ("/login", "/logout", "/setup"):
+            return self.redirect("/due")
         if path == "/sales-refund-import":
             body = ('<section><h2>导入罗盘退款 SKU 页面数据</h2><p>仅接受从目标商品“退款及体验”逐日核对的 JSON。'
                     '订单数与商品件数独立存储；空表日期不补造 SKU 行。</p>'
@@ -1235,16 +1177,16 @@ class Handler(BaseHTTPRequestHandler):
                 f'<tr><td>{esc(filename)}</td><td>{esc(saved_at)}</td>'
                 f'<td><form method="post" action="/forget-archive"><input type="hidden" name="archive_hash" value="{esc(archive_hash)}">'
                 f'<button>清除此 ZIP 的临时密码</button></form></td></tr>' for archive_hash, filename, saved_at in remembered)
-            body = ('<section><h2>上传抖店报表</h2><p>选择抖店导出的加密 ZIP 或 CSV。默认只在本次解压时使用密码；主动勾选后，仅在当前登录会话的服务内存中临时记住同一 ZIP，供北京时间当天复用。当天结束、退出登录、手动清除或服务重启后失效。密码不写入数据库、磁盘或浏览器存储。报表须为商品维度，包含商家编码等中文列。</p>'
+            body = ('<section><h2>上传抖店报表</h2><p>选择抖店导出的加密 ZIP 或 CSV。默认只在本次解压时使用密码；主动勾选后，仅在当前本机工作台进程的内存中临时记住同一 ZIP，供北京时间当天复用。当天结束、手动清除或服务重启后失效。密码不写入数据库、磁盘或浏览器存储。报表须为商品维度，包含商家编码等中文列。</p>'
                     '<form method="post" action="/import" enctype="multipart/form-data">'
                     '<p><label>报表文件 <input type="file" name="upload" accept=".zip,.csv" required></label></p>'
                     '<p><label>ZIP 解压密码 <input type="password" name="zip_password" autocomplete="off" placeholder="已记住的同一 ZIP 可留空"></label></p>'
-                    '<p><label><input type="checkbox" name="remember_zip" value="yes"> 当天临时记住此压缩包密码（仅当前登录会话）</label></p>'
+                    '<p><label><input type="checkbox" name="remember_zip" value="yes"> 当天临时记住此压缩包密码（仅当前本机进程）</label></p>'
                     '<p><label>抖店店铺 ID <input name="shop_id" inputmode="numeric" required placeholder="店铺 ID"></label></p>'
                     '<p><label>仅导入实际发货日 <input type="date" name="shipped_day"></label> <small class="muted">留空则导入整份报表；填写后只导入该日“发货时间”对应的订单。</small></p>'
                     '<p><label><input type="checkbox" name="history_only" value="yes"> 作为历史订单回填（仅存本机历史区，不更新当前待发货）</label></p>'
                     '<p><button>解压并导入</button></p></form><p class="muted">单个上传文件最多 25 MB，解压后 CSV 最多 50 MB。每次导入都是快照，不会自动同步抖店或飞书。</p></section>'
-                    f'<section><h2>当天临时记住的 ZIP</h2><form method="post" action="/forget-archive"><input type="hidden" name="scope" value="all"><button>清除当前会话全部临时密码</button></form><table><tr><th>文件</th><th>保存时间</th><th>操作</th></tr>{remembered_rows}</table></section>'
+                    f'<section><h2>当天临时记住的 ZIP</h2><form method="post" action="/forget-archive"><input type="hidden" name="scope" value="all"><button>清除本机进程全部临时密码</button></form><table><tr><th>文件</th><th>保存时间</th><th>操作</th></tr>{remembered_rows}</table></section>'
                     '<section><h2>粘贴 CSV</h2><p>保留原有方式，支持抖店商品维度 CSV 或 sample_orders.csv 测试格式。</p>'
                     '<form method="post" action="/import"><p><label>抖店店铺 ID（抖店报表必填） <input name="shop_id" inputmode="numeric" placeholder="店铺 ID"></label></p>'
                     '<p><label>仅导入实际发货日 <input type="date" name="shipped_day"></label></p>'
@@ -1265,18 +1207,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
-            if path == "/setup" and not admin_exists():
-                form = self.form()
-                set_password(form.get("password", [""])[0])
-                return self.redirect("/login")
-            if path == "/login" and admin_exists():
-                form = self.form()
-                if not check_password(form.get("password", [""])[0]):
-                    return self.send_html(layout("登录失败", '<section><p class="error">密码错误</p><a href="/login">返回登录</a></section>'), 401)
-                token = create_session()
-                return self.redirect("/due", f"session={token}; HttpOnly; SameSite=Strict; Max-Age={SESSION_COOKIE_AGE}; Path=/")
-            if not self.authorized():
-                return self.redirect("/login")
+            if not self.valid_host() or self.headers.get("Origin") != f"http://127.0.0.1:{PORT}":
+                return self.send_html("Invalid request origin", 403)
+            if self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+                return self.send_html("Invalid request source", 403)
+            nonce = self.form().get("_csrf", [""])[0]
+            if not isinstance(nonce, str) or not hmac.compare_digest(nonce, FORM_NONCE):
+                return self.send_html("Invalid form token", 403)
             if path == "/sales-refund-import":
                 content = self.form().get("refund_json", [""])[0]
                 days, rows = import_refund_sku_page_json(content)
@@ -1358,16 +1295,16 @@ class Handler(BaseHTTPRequestHandler):
                 if archive_hash and password_for_memory:
                     try:
                         temporary_zip_put(self.session_identity(), archive_hash, filename, password_for_memory)
-                        save_note = "此 ZIP 密码仅在当前登录会话的服务内存中暂存，北京时间当天有效。"
+                        save_note = "此 ZIP 密码仅在当前本机工作台进程的内存中暂存，北京时间当天有效。"
                     finally:
                         password_for_memory = None
                 elif password_from_memory:
-                    save_note = "已使用当前会话当天临时记住的此 ZIP 密码。"
+                    save_note = "已使用当前本机工作台进程当天临时记住的此 ZIP 密码。"
                 result_link = '<a href="/history">查看历史订单</a>' if history_only else '<a href="/due">查看全部待发货</a>'
                 return self.send_html(layout("导入结果", f'<section><h2>导入结果</h2><p>接受 {accepted} 行，拒绝 {len(errors)} 行。</p><p>{esc(save_note)}</p><pre>{esc(chr(10).join(errors))}</pre>{result_link}</section>', True))
             self.send_html(layout("未找到", "<section>操作不存在。</section>", True), 404)
         except (ValueError, UnicodeDecodeError) as exc:
-            self.send_html(layout("输入错误", f'<section><p class="error">{esc(exc)}</p><a href="/">返回</a></section>', self.authorized()), 400)
+            self.send_html(layout("输入错误", f'<section><p class="error">{esc(exc)}</p><a href="/">返回</a></section>', True), 400)
 
 
 if __name__ == "__main__":
