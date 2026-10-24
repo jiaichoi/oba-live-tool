@@ -19,26 +19,30 @@ class OrderSyncCoordinator {
   private statuses = new Map<string, OrderSyncStatus>()
   private generations = new Map<string, number>()
   private verifiedShops = new Map<string, { generation: number; shopId: string }>()
+  private activeSources = new Map<string, 'live' | 'shop'>()
 
   getStatus(accountId: string): OrderSyncStatus | null {
     return this.statuses.get(accountId) ?? null
   }
 
-  onAuthenticated(accountId: string) {
+  onAuthenticated(accountId: string, source: 'live' | 'shop' = 'live') {
     const generation = (this.generations.get(accountId) ?? 0) + 1
     this.generations.set(accountId, generation)
     this.verifiedShops.delete(accountId)
+    this.activeSources.set(accountId, source)
     this.setStatus(accountId, {
       phase: 'awaiting-verification',
-      message: '直播中控已登录；待核验订单页权限、店铺 ID 与完整商品维度报表，尚未同步。',
+      message: `${source === 'shop' ? '店铺后台' : '直播中控'}已检测到登录；待核验订单页权限、店铺 ID 与完整商品维度报表，尚未同步。`,
       shopId: null,
     })
     return generation
   }
 
-  cancel(accountId: string) {
+  cancel(accountId: string, source: 'live' | 'shop' = 'live') {
+    if (this.activeSources.get(accountId) !== source) return
     this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1)
     this.verifiedShops.delete(accountId)
+    this.activeSources.delete(accountId)
     this.setStatus(accountId, {
       phase: 'idle',
       message: '店铺连接已断开；保留上次已发布的本机快照。',

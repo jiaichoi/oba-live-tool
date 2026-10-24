@@ -76,6 +76,9 @@ export const IPC_CHANNELS = {
   orderExport: {
     open: 'orderExport:open',
     close: 'orderExport:close',
+    check: 'orderExport:check',
+    getStatus: 'orderExport:getStatus',
+    status: 'orderExport:status',
     downloaded: 'orderExport:downloaded',
   },
   orderSync: {

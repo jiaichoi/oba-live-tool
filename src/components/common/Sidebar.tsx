@@ -34,6 +34,11 @@ export default function Sidebar() {
 
   const orderTabs: SidebarTab[] = [
     {
+      id: '/orders/connect',
+      name: '连接店铺后台',
+      icon: <PackageCheck className="w-5 h-5" />,
+    },
+    {
       id: '/orders/due',
       name: '全部待发货',
       icon: <ClipboardList className="w-5 h-5" />,

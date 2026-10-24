@@ -25,6 +25,10 @@ export const router = createHashRouter([
         element: <Workbench path="/due" />,
       },
       {
+        path: '/orders/connect',
+        element: <OrderExport title="连接店铺后台" />,
+      },
+      {
         path: '/orders/shipped',
         element: <Workbench path="/shipped" />,
       },
