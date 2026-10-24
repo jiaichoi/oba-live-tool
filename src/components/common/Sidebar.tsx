@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router'
-import { ChartColumn, ChevronDown, ClipboardList, Database, FolderDown, History, List, PackageCheck, RadioTower, Upload } from 'lucide-react'
+import { ChartColumn, ChevronDown, ClipboardList, Database, History, List, PackageCheck, RadioTower, Upload } from 'lucide-react'
 import { abilities, autoReplyPlatforms } from '@/abilities'
 import { useCurrentAutoMessage } from '@/hooks/useAutoMessage'
 import { useCurrentAutoPopUp } from '@/hooks/useAutoPopUp'
@@ -35,12 +35,12 @@ export default function Sidebar() {
   const orderTabs: SidebarTab[] = [
     {
       id: '/orders/connect',
-      name: '连接店铺后台',
+      name: '打开店铺订单',
       icon: <PackageCheck className="w-5 h-5" />,
     },
     {
       id: '/orders/due',
-      name: '全部待发货',
+      name: '自动整理订单',
       icon: <ClipboardList className="w-5 h-5" />,
     },
     {
@@ -184,7 +184,6 @@ export default function Sidebar() {
         <h2 className="text-lg font-semibold mb-6">功能列表</h2>
         <nav className="space-y-2">
           {renderGroup('order-fulfillment-links', '订单履约', <ClipboardList className="w-5 h-5" />, orderTabs, orderOpen, setOrderOpen, isOrderRoute)}
-          {renderTab({ id: '/order-export', name: '订单报表下载', icon: <FolderDown className="w-5 h-5" /> })}
           {renderGroup('sales-links', '销量分析', <ChartColumn className="w-5 h-5" />, salesTabs, salesOpen, setSalesOpen, isSalesRoute)}
           {renderGroup('data-links', '数据管理', <Database className="w-5 h-5" />, dataTabs, dataOpen, setDataOpen, isDataRoute)}
           {renderGroup('live-tools-links', '直播工具', <RadioTower className="w-5 h-5" />, visibleLiveTabs, liveOpen, setLiveOpen, isLiveRoute)}

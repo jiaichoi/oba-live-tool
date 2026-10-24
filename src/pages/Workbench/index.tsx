@@ -16,9 +16,12 @@ function outerRoute(path: string) {
   return null
 }
 
+let nextWorkbenchMount = 0
+
 /** The native view keeps local forms, filters and order details on their own origin. */
 export default function Workbench({ path }: { path: string }) {
   const target = useRef<HTMLDivElement>(null)
+  const mountKey = useRef(++nextWorkbenchMount)
   const location = useLocation()
   const navigate = useNavigate()
   const preservePath = (location.state as { embeddedPath?: string } | null)?.embeddedPath
@@ -51,12 +54,17 @@ export default function Workbench({ path }: { path: string }) {
     if (!element) return
     const show = () => {
       const rect = element.getBoundingClientRect()
-      if (rect.width < 1 || rect.height < 1) return
+      // The bottom log panel reduces the visible content area. Keep the native
+      // view inside the window instead of sending its offscreen CSS height.
+      const offset = path === '/due' ? 64 : 0
+      const width = Math.min(Math.round(rect.width + offset), Math.floor(window.innerWidth - rect.x + offset - 2))
+      const height = Math.min(Math.round(rect.height), Math.floor(window.innerHeight - rect.y + offset - 150), path === '/due' ? 260 : Number.MAX_SAFE_INTEGER)
+      if (width < 1 || height < 1) return
       void window.ipcRenderer.invoke(IPC_CHANNELS.workbench.show, {
-        x: Math.round(rect.x), y: Math.round(rect.y),
-        width: Math.round(rect.width), height: Math.round(rect.height),
-        path, requestKey: location.key, preservePath,
-      })
+        x: Math.max(0, Math.round(rect.x - offset)), y: Math.max(0, Math.round(rect.y - offset)),
+        width, height, viewportWidth: window.innerWidth,
+        path, requestKey: `${location.key}:${mountKey.current}`, preservePath,
+      }).catch(error => console.error('本机订单视图显示失败', error))
     }
     const observer = new ResizeObserver(show)
     observer.observe(element)
@@ -65,14 +73,12 @@ export default function Workbench({ path }: { path: string }) {
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', show)
-      void window.ipcRenderer.invoke(IPC_CHANNELS.workbench.hide)
+      void window.ipcRenderer.invoke(IPC_CHANNELS.workbench.hide, `${location.key}:${mountKey.current}`)
     }
   }, [path, location.key, preservePath])
 
   return <div className="flex h-full flex-col gap-2">
-    {path === '/due' && <div role="status" className="rounded-lg border bg-amber-50 px-4 py-2 text-sm text-amber-950">
-      {syncMessage}
-    </div>}
+    {path !== '/due' && syncMessage && <div role="status" className="rounded-lg border bg-amber-50 px-4 py-2 text-sm text-amber-950">{syncMessage}</div>}
     <div ref={target} className="min-h-[400px] flex-1 rounded-lg border bg-white" />
   </div>
 }

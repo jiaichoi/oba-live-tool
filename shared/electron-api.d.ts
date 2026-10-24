@@ -136,11 +136,13 @@ export interface IpcChannels {
     y: number
     width: number
     height: number
+    viewportWidth: number
     path: string
     requestKey: string
     preservePath?: string
   }) => void
-  [IPC_CHANNELS.workbench.hide]: () => void
+  [IPC_CHANNELS.workbench.hide]: (requestKey: string) => void
+  [IPC_CHANNELS.workbench.reloadDue]: () => Promise<boolean>
   [IPC_CHANNELS.workbench.navigated]: (location: { path: string }) => void
   [IPC_CHANNELS.orderExport.open]: (accountId: string, chromePath?: string) => Promise<{
     accountId: string
@@ -159,6 +161,35 @@ export interface IpcChannels {
     phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
     message: string
     updatedAt: string
+  }>
+  [IPC_CHANNELS.orderExport.probeOrderPage]: (accountId: string) => Promise<{
+    ok: boolean
+    message: string
+    observedAt: string
+    sourceUrl: string | null
+    hasRecentPartition: boolean
+    hasOlderPartition: boolean
+    hasPendingFilter: boolean
+    visiblePendingMainOrderCount: number | null
+    domHints?: string[]
+  }>
+  [IPC_CHANNELS.orderExport.capturePendingRows]: (accountId: string) => Promise<{
+    ok: boolean
+    message: string
+    localPath?: string
+    parents?: number
+    lines?: number
+    pages?: number[]
+    issues?: string[]
+  }>
+  [IPC_CHANNELS.orderExport.organizePending]: (accountId: string) => Promise<{
+    ok: boolean
+    message: string
+    parents?: number
+    children?: number
+    quantity?: number
+    empty?: boolean
+    observedAt?: string
   }>
   [IPC_CHANNELS.orderExport.getStatus]: (accountId: string) => Promise<{
     accountId: string

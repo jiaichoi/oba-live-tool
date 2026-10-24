@@ -95,14 +95,22 @@ const workbenchPages = new Set([
   '/', '/due', '/shipped', '/sales', '/stock', '/history', '/history-sku', '/imports', '/import',
 ])
 
-function showWorkbench(bounds: { x: number; y: number; width: number; height: number; path: string; requestKey: string; preservePath?: string }) {
+function showWorkbench(bounds: { x: number; y: number; width: number; height: number; viewportWidth: number; path: string; requestKey: string; preservePath?: string }) {
   if (!win || win.isDestroyed()) return
   const [contentWidth, contentHeight] = win.getContentSize()
-  const values = [bounds.x, bounds.y, bounds.width, bounds.height]
+  const values = [bounds.x, bounds.y, bounds.width, bounds.height, bounds.viewportWidth]
   if (!values.every(value => Number.isFinite(value) && Number.isInteger(value))) return
-  if (bounds.x < 0 || bounds.y < 0 || bounds.width < 1 || bounds.height < 1) return
-  if (bounds.x + bounds.width > contentWidth || bounds.y + bounds.height > contentHeight) return
+  if (bounds.x < 0 || bounds.y < 0 || bounds.width < 1 || bounds.height < 1 || bounds.viewportWidth < 1) return
   if (!workbenchPages.has(bounds.path)) return
+  // Renderer CSS pixels can differ from BrowserWindow content coordinates when
+  // the user has zoomed the UI. Scale the native child view into the same space.
+  const scale = contentWidth / bounds.viewportWidth
+  const x = Math.round(bounds.x * scale)
+  const y = Math.round(bounds.y * scale)
+  if (x >= contentWidth || y >= contentHeight) return
+  const visibleBounds = { x, y,
+    width: Math.min(Math.max(1, Math.round(bounds.width * scale)), contentWidth - x),
+    height: Math.min(Math.max(1, Math.round(bounds.height * scale)), contentHeight - y) }
 
   if (!workbenchView) {
     workbenchView = new WebContentsView({
@@ -136,7 +144,7 @@ function showWorkbench(bounds: { x: number; y: number; width: number; height: nu
     win.contentView.addChildView(workbenchView)
     workbenchVisible = true
   }
-  workbenchView.setBounds(bounds)
+  workbenchView.setBounds(visibleBounds)
 }
 
 ipcMain.handle(IPC_CHANNELS.workbench.show, (event, bounds) => {
@@ -144,15 +152,24 @@ ipcMain.handle(IPC_CHANNELS.workbench.show, (event, bounds) => {
   showWorkbench(bounds)
 })
 
-ipcMain.handle(IPC_CHANNELS.workbench.hide, event => {
-  if (event.sender !== win?.webContents || !win || !workbenchView || !workbenchVisible) return
+ipcMain.handle(IPC_CHANNELS.workbench.hide, (event, requestKey: string) => {
+  if (event.sender !== win?.webContents || !win || !workbenchView || !workbenchVisible ||
+      requestKey !== lastWorkbenchRequestKey) return
   win.contentView.removeChildView(workbenchView)
   workbenchVisible = false
 })
 
+ipcMain.handle(IPC_CHANNELS.workbench.reloadDue, event => {
+  if (event.sender !== win?.webContents || !workbenchView) return false
+  const current = workbenchView.webContents.getURL()
+  if (!current.startsWith(`${workbenchOrigin}/due`)) return false
+  workbenchView.webContents.reload()
+  return true
+})
+
 async function createWindow() {
   win = new BrowserWindow({
-    title: `OBA 直播工具 - v${app.getVersion()}`,
+    title: `线上经营工具 - v${app.getVersion()}`,
     width: 1280,
     height: 800,
     autoHideMenuBar: app.isPackaged,

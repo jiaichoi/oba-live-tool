@@ -10,7 +10,6 @@ import semver from 'semver'
 import { IPC_CHANNELS } from 'shared/ipcChannels'
 import * as yaml from 'yaml'
 import windowManager from '#/windowManager'
-import packageJson from '../../../package.json'
 import { createLogger } from '../logger'
 import { errorMessage, sleep } from '../utils'
 
@@ -26,10 +25,10 @@ type LatestYml = {
   releaseDate: string
 }
 
-const GITHUB_OWNER = 'qiutongxue'
+const GITHUB_OWNER = 'jiaichoi'
 const GITHUB_REPO = 'oba-live-tool'
 const CDN_URL = 'https://fastly.jsdelivr.net/gh/'
-const PRODUCT_NAME = packageJson.name
+const PRODUCT_NAME = '线上经营工具'
 
 const logger = createLogger('update')
 

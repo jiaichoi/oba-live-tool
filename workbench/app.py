@@ -23,11 +23,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from zoneinfo import ZoneInfo
+from partial_due_display import render_partial_due
 
 ROOT = Path(__file__).resolve().parent
 # Set a separate directory for development or cloud work. The production default stays local.
 DATA = Path(os.environ.get("TUTIANDUO_DATA_DIR", str(ROOT / "data"))).expanduser()
 DB = DATA / "orders.db"
+PARTIAL_DUE_JSON = DATA / "partial_due.json"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("TUTIANDUO_PORT", "8765"))
 if not 1 <= PORT <= 65535:
@@ -695,6 +697,95 @@ def import_doudian_csv(content, shop_id, source="抖店后台商品维度 CSV", 
                        publish_open_shop=shop_id if not history_only and not shipped_day else None)
 
 
+def validate_direct_order_pages(evidence, expected_shop_id):
+    """Validate a complete, independently captured order-page set before publication.
+
+    This function does not browse or capture the shop. The future read-only page
+    adapter must supply observed values, including both six-month partitions.
+    """
+    if not expected_shop_id or not str(expected_shop_id).isdigit():
+        raise ValueError("缺少已核验的数字店铺 ID")
+    if not isinstance(evidence, dict) or evidence.get("shop_id") != str(expected_shop_id):
+        raise ValueError("订单页面店铺 ID 与目标店铺不符")
+    url = urlparse(str(evidence.get("source_url") or ""))
+    if url.scheme != "https" or url.netloc != "fxg.jinritemai.com" or not url.path.startswith(
+            "/ffa/morder/order/list"):
+        raise ValueError("订单页面来源未核验")
+    filters = evidence.get("filters")
+    if filters != {"order_status": "待发货", "aftersale_status": "全部",
+                   "created_from": "", "created_to": ""}:
+        raise ValueError("未证明筛选为全部待发货且无下单时间限制")
+    try:
+        observed_at = datetime.fromisoformat(str(evidence["observed_at"]))
+        if observed_at.tzinfo is None:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("缺少有效的页面观察时间") from None
+    partitions = evidence.get("partitions")
+    expected_partitions = {"recent_6_months", "older_than_6_months"}
+    if not isinstance(partitions, list) or {p.get("key") for p in partitions if isinstance(p, dict)} != expected_partitions or len(partitions) != 2:
+        raise ValueError("须核对近 6 个月与 6 个月前两个订单分区")
+
+    normalized, seen_children, seen_parents = [], set(), set()
+    for partition in partitions:
+        name = partition["key"]
+        total, pages = partition.get("total_main_orders"), partition.get("pages")
+        if type(total) is not int or total < 0 or not isinstance(pages, list):
+            raise ValueError(f"{name} 缺少平台主订单总数或分页")
+        page_count = partition.get("page_count")
+        if type(page_count) is not int or page_count < 0 or len(pages) != page_count or (total == 0) != (page_count == 0):
+            raise ValueError(f"{name} 分页数量不完整")
+        partition_parents = set()
+        for number, page in enumerate(pages, 1):
+            if not isinstance(page, dict) or page.get("number") != number or not isinstance(page.get("orders"), list) or not page["orders"]:
+                raise ValueError(f"{name} 第 {number} 页未按顺序完整读取")
+            for order in page["orders"]:
+                if not isinstance(order, dict):
+                    raise ValueError("主订单结构无效")
+                parent = str(order.get("shop_order_id") or "").strip()
+                if not parent or parent in partition_parents or parent in seen_parents:
+                    raise ValueError("主订单编号缺失或跨页重复")
+                partition_parents.add(parent)
+                seen_parents.add(parent)
+                children = order.get("items")
+                if not isinstance(children, list) or not children:
+                    raise ValueError("主订单缺少完整商品子订单")
+                for child in children:
+                    if not isinstance(child, dict):
+                        raise ValueError("商品子订单结构无效")
+                    if child.get("shop_id") not in (None, str(expected_shop_id)) or child.get("shop_order_id") not in (None, parent):
+                        raise ValueError("商品子订单与店铺或主订单不符")
+                    item = dict(child, shop_id=str(expected_shop_id), shop_order_id=parent)
+                    item = validate_row(item, len(normalized) + 1)
+                    key = item["sku_order_id"]
+                    if key in seen_children:
+                        raise ValueError("商品子订单编号跨页重复")
+                    seen_children.add(key)
+                    if item["status"] not in OPEN_STATUSES:
+                        raise ValueError("待发货集合混入非开放状态")
+                    if item["product_code"].startswith("编码待核:") or item["color"] == "颜色待核" or item["size"] == "尺码待核":
+                        raise ValueError("商品编码或规格待核，不能发布尺码矩阵")
+                    item.update(source_type="doudian",
+                                aftersale_status=str(child.get("aftersale_status") or "-").strip(),
+                                shipped_at="", merchant_code_raw=str(child.get("merchant_code_raw") or ""),
+                                report_code_raw=str(child.get("report_code_raw") or ""),
+                                product_id_raw=str(child.get("product_id_raw") or ""),
+                                code_source=str(child.get("code_source") or "页面核验"))
+                    if item["status"] == "部分发货" or item["aftersale_status"] not in ("", "-"):
+                        raise ValueError("部分发货或售后状态待复核，不能自动发布")
+                    normalized.append(item)
+        if len(partition_parents) != total:
+            raise ValueError(f"{name} 实际主订单数与平台总数不符")
+    return normalized
+
+
+def import_direct_order_pages(evidence, expected_shop_id):
+    """Publish only after two-partition, parent/child and field checks pass."""
+    items = validate_direct_order_pages(evidence, expected_shop_id)
+    return save_orders(items, [], "抖店订单页完整直接读取", "doudian",
+                       publish_open_shop=str(expected_shop_id), allow_complete_empty=True)
+
+
 def shipped_orders(day, source_type="doudian"):
     date.fromisoformat(day)
     with connection() as db:
@@ -856,15 +947,70 @@ def layout(title, body, logged=False):
                           for path, name, titles in links)
         groups.append(f'<div class="nav-label">{label}</div>{anchors}')
     nav = f'<nav aria-label="工作台导航">{"".join(groups)}</nav>'
-    sidebar = f'<aside class="sidebar"><div class="brand">土田朵电商工作台<small>本地研发版 · V1.0</small></div>{nav}</aside>'
+    sidebar = f'<aside class="sidebar"><div class="brand">线上经营工具<small>本地研发版 · V1.0.0</small></div>{nav}</aside>'
     shell_class = "app-shell"
     body = re.sub(r'(<form\b[^>]*\bmethod="post"[^>]*>)',
                   lambda match: match.group(1) + f'<input type="hidden" name="_csrf" value="{FORM_NONCE}">',
                   body, flags=re.IGNORECASE)
-    return f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}｜土田朵电商订单管理系统 V1.0</title>{STYLE}<div class="{shell_class}">{sidebar}<div class="content"><header class="page-header"><h1>{esc(title)}</h1><p>土田朵电商订单管理系统 V1.0 · 研发版</p></header><main><p class="warn">本地研发原型｜支持手动导入抖店报表｜未连接抖店 API 或飞书</p>{body}</main></div></div></html>'
+    return f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}｜线上经营工具 V1.0.0</title>{STYLE}<div class="{shell_class}">{sidebar}<div class="content"><header class="page-header"><h1>{esc(title)}</h1><p>线上经营工具 V1.0.0 · 研发版</p></header><main><p class="warn">本地研发原型｜支持手动导入抖店报表｜未连接抖店 API 或飞书</p>{body}</main></div></div></html>'
+
+
+def embedded_due_layout(body):
+    """Show only the verified result inside OBA's native order view."""
+    compact_style = """<style>
+body{background:#fff}main{max-width:none;padding:0;margin:0}
+section{border:0;border-radius:0;margin:0;padding:16px 20px;overflow-x:auto}
+section h2{display:none}section p{margin:0 0 10px}
+table{width:100%;min-width:680px}th,td{padding:8px 10px}
+</style>"""
+    return (f'<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>待发货结果</title>{STYLE}{compact_style}<main>{body}</main></html>')
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        origin = self.headers.get("Origin", "")
+        if self.path != "/api/pending-view" or origin not in (
+                "http://localhost:5173", "http://127.0.0.1:5173"):
+            self.send_response(403)
+            self.end_headers()
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Vary", "Origin")
+        self.end_headers()
+
+    def send_pending_view(self):
+        origin = self.headers.get("Origin", "")
+        if origin not in ("http://localhost:5173", "http://127.0.0.1:5173"):
+            return self.send_html("Forbidden", 403)
+        if not render_partial_due(PARTIAL_DUE_JSON):
+            payload = {"available": False}
+        else:
+            candidate = json.loads(PARTIAL_DUE_JSON.read_text(encoding="utf-8"))
+            payload = {"available": True, "scope": candidate["scope"],
+                       "observed_at": candidate.get("observed_at"),
+                       "page_complete": candidate.get("page_complete"),
+                       "displayed_parent_count": candidate.get("displayed_parent_count"),
+                       "rows": [{key: row.get(key) for key in
+                                 ("shop_order_id", "sku_order_id", "merchant_code", "product_id",
+                                  "product_name", "color", "size", "quantity")}
+                                for row in candidate["rows"]]}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Vary", "Origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_html(self, body, status=200, cookie=None):
         data = body.encode("utf-8")
         self.send_response(status)
@@ -913,6 +1059,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html("Invalid Host", 403)
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/pending-view":
+            return self.send_pending_view()
         if path in ("/login", "/logout", "/setup"):
             return self.redirect("/due")
         if path == "/sales-refund-import":
@@ -1077,38 +1225,9 @@ class Handler(BaseHTTPRequestHandler):
             body = f'<section><h2>实际已发货 · 按发货时间</h2><form method="get"><label>发货日期 <input type="date" name="day" value="{esc(day)}" required></label> <button>查询</button></form><p>抖店导出快照：{parents} 个主订单、{count} 个子订单、{quantity} 件。</p><p class="muted">依据报表“发货时间”列筛选，包含当前状态已变化或存在售后的订单；这是导入时的快照，不会自动更新。部分发货按整行商品数量显示，需人工核对实际发出件数。</p></section><section><h2>尺码矩阵</h2>{matrix}</section><section><h2>已发货订单明细</h2><table><tr><th>订单号</th><th>有效编码</th><th>颜色 / 尺码</th><th>商品数量</th><th>当前状态</th><th>售后状态</th><th>发货时间</th></tr>{trs}</table></section>'
             return self.send_html(layout("实际已发货", body, True))
         if path == "/due":
-            query = parse_qs(parsed.query)
-            source_type = current_source(query)
-            day = query.get("day", [beijing_day()])[0]
-            try:
-                date.fromisoformat(day)
-            except ValueError:
-                return self.send_html(layout("日期错误", '<section>日期须为 YYYY-MM-DD。</section>', True), 400)
-            full_rows = open_snapshot_orders(source_type)
-            today_rows = due_orders(day, source_type=source_type)
-            full_matrix, full_review = render_matrix(full_rows)
-            full_parents = len({r["shop_order_id"] for r in full_rows})
-            full_quantity = sum(r["quantity"] for r in full_rows)
-            fallback_count = sum(r["code_source"] == "货号回退" for r in full_rows) if source_type == "doudian" else 0
-            full_code_review = sum(r["code_source"] == "两列均空" for r in full_rows) if source_type == "doudian" else 0
-            snapshot_time = max((r["imported_at"] for r in full_rows), default="")
-            if source_type == "doudian":
-                snapshot_time = max(snapshot_time, latest_open_publication() or "")
-            snapshot_time = snapshot_time or "暂无"
-            today_quantity = sum(r["quantity"] for r in today_rows)
-            body = (
-                f'<section><h2>全部待发货 · 最新导入快照</h2>{source_links("/due", source_type)}'
-                f'<p><strong>{full_parents} 个主订单、{len(full_rows)} 个商品子订单、{full_quantity} 件</strong>；'
-                f'导入时间 {esc(snapshot_time)}。</p>'
-                '<p class="muted">同步状态：尚未接通自动同步。此处是本机已发布的导入快照；'
-                '未核实抖店全店报表范围前，不代表实时或全店完整待发货。</p>'
-                f'<p>其中 {esc(day)} 承诺发货 {today_quantity} 件。</p>'
-                f'<p class="muted">这里汇总该店最新待发货报表中的所有承诺日期；'
-                f'矩阵每个尺码格为商品件数，不是订单数。'
-                f'旧批次仍保留供追溯，不计入此矩阵；请以抖店实际导出范围核对是否覆盖更早订单。</p>'
-                f'{full_matrix}<p>部分发货、售后或规格待复核：{len(full_review)} 个子订单；'
-                f'货号回退：{fallback_count} 个子订单；两列均空待核：{full_code_review} 个子订单。</p></section>'
-            )
+            body = render_partial_due(PARTIAL_DUE_JSON)
+            if "Electron/" in self.headers.get("User-Agent", ""):
+                return self.send_html(embedded_due_layout(body))
             return self.send_html(layout("全部待发货", body, True))
         if path == "/":
             query = parse_qs(parsed.query)

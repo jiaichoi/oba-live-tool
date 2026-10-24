@@ -6,7 +6,8 @@ import AutoReply from '@/pages/AutoReply'
 import AutoReplySettings from '@/pages/AutoReply/AutoReplySettings'
 import LiveControl from '@/pages/LiveControl'
 import Workbench from '@/pages/Workbench'
-import OrderExport from '@/pages/OrderExport'
+import AutoOrders from '@/pages/AutoOrders'
+import ShopConnect from '@/pages/ShopConnect'
 import RedPacket from '@/pages/RedPacket'
 import Settings from '@/pages/SettingsPage'
 import App from '../App'
@@ -22,11 +23,11 @@ export const router = createHashRouter([
       },
       {
         path: '/orders/due',
-        element: <Workbench path="/due" />,
+        element: <AutoOrders />,
       },
       {
         path: '/orders/connect',
-        element: <OrderExport title="连接店铺后台" />,
+        element: <ShopConnect />,
       },
       {
         path: '/orders/shipped',
@@ -66,7 +67,7 @@ export const router = createHashRouter([
       },
       {
         path: '/order-export',
-        element: <OrderExport />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/auto-message',
