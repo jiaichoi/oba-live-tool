@@ -108,7 +108,12 @@ export function setupOrderExportIpcHandlers() {
     if (!accountId || accountId.length > 100 || !/^[\w-]+$/.test(accountId)) {
       return publish(accountId || '', 'failed', '账号标识无效，未打开浏览器。')
     }
-    if (sessions.has(accountId)) return inspectLogin(accountId)
+    const existing = sessions.get(accountId)
+    if (existing) {
+      const page = existing.context.pages().find(candidate => !candidate.isClosed())
+      if (page) await page.bringToFront().catch(() => undefined)
+      return inspectLogin(accountId)
+    }
     if (opening.has(accountId)) return statusOf(accountId)
     opening.add(accountId)
     publish(accountId, 'opening', '正在打开独立的店铺后台浏览器…')
