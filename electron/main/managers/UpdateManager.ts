@@ -27,7 +27,6 @@ type LatestYml = {
 
 const GITHUB_OWNER = 'jiaichoi'
 const GITHUB_REPO = 'oba-live-tool'
-const CDN_URL = 'https://fastly.jsdelivr.net/gh/'
 const PRODUCT_NAME = '线上经营工具'
 
 const logger = createLogger('update')
@@ -40,41 +39,6 @@ marked.use({
     },
   },
 })
-
-function extractChanges(changelogContent: string, userVersion: string): string {
-  const lines = changelogContent.split('\n')
-  const result = []
-
-  for (const line of lines) {
-    const versionMatch = line.match(/^##\s+v?([0-9]+\.[0-9]+\.[0-9]+)/) // 匹配版本 "## vX.Y.Z" 或 "## X.Y.Z"
-
-    if (versionMatch) {
-      const versionInLog = versionMatch[1] // X.Y.Z
-      // 遇到小于等于当前版本的就停止
-      if (semver.lte(versionInLog, userVersion)) {
-        break
-      }
-    }
-
-    result.push(line)
-  }
-
-  // slice(1) 负责过滤开头的 # Changelog
-  return result.slice(1).join('\n')
-}
-
-async function fetchWithRetry(url: string | URL, retries = 3, delay = 1000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = (await timeoutFetch(url)) as Response
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return res
-    } catch (e) {
-      if (i === retries - 1) throw e
-      await sleep(delay)
-    }
-  }
-}
 
 async function timeoutFetch(url: string | URL, timeout = 5000) {
   const controller = new AbortController()
@@ -103,42 +67,29 @@ let latestVersion: string | null = null
 
 async function getLatestVersion() {
   try {
-    // 从 package.json 获取最新版本号
-    const version = await fetch(
-      new URL(`${GITHUB_OWNER}/${GITHUB_REPO}@main/package.json`, CDN_URL),
+    // 只有本仓库实际发布的安装包才可作为更新来源；main 分支可能仍是上游版本。
+    const response = await timeoutFetch(
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
     )
-      .then(resp => resp.json())
-      .then(data => data.version)
-    logger.debug(`从 package.json 获取到的版本为 ${version}`)
+    if (!response.ok) return null
+    const release = (await response.json()) as {
+      tag_name?: string
+      body?: string
+      assets?: Array<{ name: string }>
+    }
+    const version = release.tag_name?.replace(/^v/, '')
+    if (!version || !semver.valid(version) || !release.assets?.length) return null
+    releaseNotes[version] = await marked.parse(release.body ?? '')
     latestVersion = version
     return version
   } catch (error) {
-    logger.error('获取最新版本失败', error)
+    logger.debug('本仓库尚无可用的正式发布版本', error)
     return null
   }
 }
 
 async function fetchChangelog() {
-  if (latestVersion && releaseNotes[latestVersion]) {
-    return releaseNotes[latestVersion]
-  }
-  try {
-    // 去 CDN 找
-    const changelogURL = new URL(`${GITHUB_OWNER}/${GITHUB_REPO}@main/CHANGELOG.md`, CDN_URL)
-    const changelogContent = await fetchWithRetry(changelogURL).then(res => res?.text())
-    if (changelogContent) {
-      // 找到新版本到当前版本的所有更新日志
-      const updateLog = extractChanges(changelogContent, app.getVersion())
-      // markdown 转成 html
-      const releaseNote = await marked.parse(updateLog)
-      if (latestVersion) {
-        releaseNotes[latestVersion] = releaseNote
-      }
-      return releaseNote
-    }
-  } catch {
-    return undefined
-  }
+  return latestVersion ? releaseNotes[latestVersion] : undefined
 }
 
 function getAssetsURL() {
@@ -156,6 +107,15 @@ class UpdateManager {
   constructor(private updater: Updater) {}
 
   public async checkForUpdates(source = 'github') {
+    const version = await getLatestVersion()
+    if (!version || !semver.gt(version, app.getVersion())) {
+      windowManager.send(IPC_CHANNELS.updater.updateAvailable, {
+        update: false,
+        version: app.getVersion(),
+        newVersion: app.getVersion(),
+      })
+      return
+    }
     await this.updater.checkForUpdates(source)
   }
 
@@ -362,7 +322,7 @@ class MacOSUpdater implements Updater {
         throw new Error(message)
       }
       this.versionInfo = latestYml
-      if (semver.lt(latestYml.version, app.getVersion())) {
+      if (semver.lte(latestYml.version, app.getVersion())) {
         logger.info(`${app.getVersion()} 已经是最新版本，无需更新`)
         return
       }
