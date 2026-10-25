@@ -1,7 +1,7 @@
 {
   "name": "oba-live-tool",
   "type": "module",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "description": "线上经营工具，整合店铺订单工作台与直播运营功能",
   "author": "qiutongxue",

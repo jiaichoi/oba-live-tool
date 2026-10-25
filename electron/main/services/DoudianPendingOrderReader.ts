@@ -129,6 +129,33 @@ export function parseStructuredVariant(item: Record<string, unknown>): { color: 
   return { color: [...found.color][0], size: [...found.size][0], role: explicitColor ? 'color' : rawSpecRole }
 }
 
+/** Confirm an official SKU against the page's merchandise text. The page can
+ * omit a style prefix (for example, "【女款】") or fail to split a colour that
+ * contains parentheses, so its parsed colour is not authoritative. */
+export function officialVariantMatchesVisibleLine(
+  item: Record<string, unknown>,
+  line: Pick<VisibleOrderLine, 'productName' | 'color' | 'size'>,
+  variant: { color: string; size: string; role: 'color' | 'raw_spec' },
+): boolean {
+  if (line.color === variant.color && line.size?.toUpperCase() === variant.size.toUpperCase()) return true
+  const specs = item.sku_spec
+  if (!Array.isArray(specs)) return false
+  let rawColor: string | null = null
+  let rawSize: string | null = null
+  for (const entry of specs) {
+    if (!entry || typeof entry !== 'object') continue
+    const spec = entry as { name?: unknown; value?: unknown }
+    if (typeof spec.name !== 'string' || typeof spec.value !== 'string') continue
+    if (/^(?:color|color_name|sku_color|颜色|颜色分类|色号)$/iu.test(spec.name)) rawColor = spec.value.trim()
+    if (/^(?:size|size_name|sku_size|尺码|尺码大小|尺寸|大小)$/iu.test(spec.name)) rawSize = spec.value.trim()
+  }
+  if (!rawColor || !rawSize || rawColor !== variant.color ||
+      rawSize.split(/[（(]/u, 1)[0].trim().toUpperCase() !== variant.size.toUpperCase() ||
+      (line.size && line.size.toUpperCase() !== variant.size.toUpperCase())) return false
+  const compact = (value: string) => value.replace(/\s+/gu, '')
+  return compact(line.productName).includes(compact(`${rawColor}/${rawSize}`))
+}
+
 function parseColorSize(item: string): { color: string; size: string; role: 'color' | 'raw_spec' } | null {
   const text = item.split(/\s+x\s*\d+\s*(?:商家编码|带货达人|商品单|$)/i)[0]
   const labeledColor = text.match(/(?:颜色|颜色分类)\s*[:：]\s*([^,，;；\s]{1,24})/u)?.[1]

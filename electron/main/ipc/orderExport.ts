@@ -7,7 +7,7 @@ import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
 import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
-import { capturePendingOrderPages, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
+import { capturePendingOrderPages, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import windowManager from '../windowManager'
 
@@ -53,6 +53,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
     return []
   }
   const products = new Map<string, { product_id: string; product_name: string; merchant_sku_code: string;
+    official_item: Record<string, unknown>;
     variant: { color: string; size: string; role: 'color' | 'raw_spec' } | null }>()
   for (const response of evidence) {
     if (!response.path.endsWith('/api/order/searchlist')) continue
@@ -69,7 +70,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
           throw new Error('官方列表商品子订单编号或状态未核实')
         const key = `${parentId}:${childId}`
         if (products.has(key)) continue
-        products.set(key, { product_id: String(item.product_id ?? ''),
+        products.set(key, { official_item: item, product_id: String(item.product_id ?? ''),
           product_name: String(item.product_name ?? ''), merchant_sku_code: String(item.merchant_sku_code ?? ''),
           variant: parseStructuredVariant(item) })
       }
@@ -87,8 +88,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
     const item = products.get(key)
     // The shop sometimes renders an ancillary consumer remark as a duplicate row.
     if (!item) continue
-    if (item.variant && line.color && line.size &&
-        (item.variant.color !== line.color || item.variant.size.toUpperCase() !== line.size.toUpperCase()))
+    if (item.variant && !officialVariantMatchesVisibleLine(item.official_item, line, item.variant))
       throw new Error('官方商品规格与页面商品行不一致；旧快照未改动')
     const variant = item.variant ?? (line.color && line.size ? { color: line.color, size: line.size,
       role: line.variantRole ?? 'raw_spec' } : null)

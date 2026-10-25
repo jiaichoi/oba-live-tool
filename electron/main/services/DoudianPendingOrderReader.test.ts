@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
+import { officialVariantMatchesVisibleLine, parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
 
 describe('visible Doudian parent and merchandise rows', () => {
   it('ignores a live shipping countdown but detects quantity and status changes', () => {
@@ -37,6 +37,22 @@ describe('visible Doudian parent and merchandise rows', () => {
     assert.deepEqual(parseStructuredVariant({ sku_spec: '女-鸿运套装/2XL' }),
       { color: '女-鸿运套装', size: '2XL', role: 'raw_spec' })
     assert.equal(parseStructuredVariant({ sku_properties: [{ name: '花色', value: '01' }] }), null)
+  })
+  it('matches an official full SKU when the page omits a style prefix or cannot split the colour', () => {
+    const item = { sku_spec: [
+      { name: '颜色分类', value: '【男款】黑灰（1件装）' },
+      { name: '尺码大小', value: 'XL(110-130斤)' },
+    ] }
+    const variant = parseStructuredVariant(item)!
+    assert.equal(officialVariantMatchesVisibleLine(item, {
+      productName: '保暖棉裤【男款】黑灰（1件装）/XL(110-130斤)', color: null, size: null,
+    }, variant), true)
+    assert.equal(officialVariantMatchesVisibleLine(item, {
+      productName: '保暖棉裤【男款】黑灰（1件装）/2XL(130-155斤)', color: null, size: null,
+    }, variant), false)
+    assert.equal(officialVariantMatchesVisibleLine(item, {
+      productName: '保暖棉裤【男款】黑灰（1件装）/XL(110-130斤)', color: '黑灰', size: '2XL',
+    }, variant), false)
   })
   it('keeps parent and SKU counts distinct and reads only order columns', () => {
     const result = parseVisibleRows([
