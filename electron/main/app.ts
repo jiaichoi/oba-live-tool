@@ -1,6 +1,9 @@
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { mkdir } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, WebContentsView, dialog, ipcMain, shell } from 'electron'
 import { IPC_CHANNELS } from 'shared/ipcChannels'
@@ -76,6 +79,12 @@ if (os.release().startsWith('6.1')) app.disableHardwareAcceleration()
 // Set application name for Windows 10+ notifications
 if (process.platform === 'win32') app.setAppUserModelId(app.getName())
 
+// Keep the independent desktop app's state separate from older OBA installs.
+// This also gives it its own single-instance lock and starts with no saved tasks.
+if (app.isPackaged) {
+  app.setPath('userData', path.join(app.getPath('appData'), '线上经营工具'))
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
   process.exit(0)
@@ -88,15 +97,59 @@ let lastWorkbenchRequestKey = ''
 const preload = path.join(__dirname, '../preload/index.mjs')
 const indexHtml = path.join(RENDERER_DIST, 'index.html')
 const configuredPort = Number(process.env.TUTIANDUO_PORT || 8765)
-const workbenchPort = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535
+let workbenchPort = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535
   ? configuredPort : 8765
-const workbenchOrigin = `http://127.0.0.1:${workbenchPort}`
+let workbenchOrigin = `http://127.0.0.1:${workbenchPort}`
+let workbenchProcess: ChildProcess | null = null
+let workbenchServiceReady = false
+
+async function availableLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') { server.close(); reject(new Error('本机端口不可用')); return }
+      server.close(error => error ? reject(error) : resolve(address.port))
+    })
+  })
+}
+
+async function startWorkbenchService() {
+  if (!app.isPackaged) return
+  // The old local prototype may already own 8765. Never attach this app to
+  // another process or require the user to stop their existing workbench.
+  workbenchPort = await availableLoopbackPort()
+  workbenchOrigin = `http://127.0.0.1:${workbenchPort}`
+  const dataDir = path.join(app.getPath('userData'), 'workbench-data')
+  const executable = path.join(process.resourcesPath, 'workbench',
+    process.platform === 'win32' ? 'tutianduo-workbench.exe' : 'tutianduo-workbench')
+  const healthy = async () => {
+    try {
+      const response = await fetch(`${workbenchOrigin}/api/health`, { signal: AbortSignal.timeout(1000) })
+      const state = await response.json() as { service?: string; data_dir?: string }
+      return response.ok && state.service === 'tutianduo-order-workbench' && state.data_dir === dataDir
+    } catch { return false }
+  }
+  await mkdir(dataDir, { recursive: true, mode: 0o700 })
+  workbenchProcess = spawn(executable, [], {
+    env: { ...process.env, TUTIANDUO_DATA_DIR: dataDir, TUTIANDUO_PORT: String(workbenchPort) },
+    stdio: 'ignore',
+  })
+  workbenchProcess.on('error', error => createLogger('workbench').error('本机订单服务启动失败', error))
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (await healthy()) { workbenchServiceReady = true; return }
+    if (workbenchProcess.exitCode !== null) break
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  createLogger('workbench').warn('本机订单服务未就绪；请检查 Python 运行环境或端口占用')
+}
 const workbenchPages = new Set([
   '/', '/due', '/shipped', '/sales', '/stock', '/history', '/history-sku', '/imports', '/import',
 ])
 
 function showWorkbench(bounds: { x: number; y: number; width: number; height: number; viewportWidth: number; path: string; requestKey: string; preservePath?: string }) {
-  if (!win || win.isDestroyed()) return
+  if (!win || win.isDestroyed() || !workbenchServiceReady) return
   const [contentWidth, contentHeight] = win.getContentSize()
   const values = [bounds.x, bounds.y, bounds.width, bounds.height, bounds.viewportWidth]
   if (!values.every(value => Number.isFinite(value) && Number.isInteger(value))) return
@@ -220,6 +273,7 @@ async function createWindow() {
 
 app
   .whenReady()
+  .then(startWorkbenchService)
   .then(logStartupInfo)
   .then(() => providerService.initialize())
   .then(createWindow)
@@ -229,6 +283,8 @@ app.on('window-all-closed', async () => {
   accountManager.cleanup()
   if (process.platform !== 'darwin') app.quit()
 })
+
+app.on('before-quit', () => { workbenchProcess?.kill() })
 
 app.on('second-instance', () => {
   if (win) {

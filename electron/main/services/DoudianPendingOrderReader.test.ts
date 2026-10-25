@@ -1,14 +1,37 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { parseStructuredVariant, parseVisibleRows } from './DoudianPendingOrderReader'
+import { parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
 
 describe('visible Doudian parent and merchandise rows', () => {
+  it('ignores a live shipping countdown but detects quantity and status changes', () => {
+    const capture: PendingOrderCapture = { sourceUrl: '', visibleShopId: null, startedAt: '', finishedAt: '',
+      complete: false, issues: [], partitions: [{ key: 'recent_6_months', displayedPendingCount: 1,
+        endedAtLastPage: true, issues: [], pages: [{ number: 1, parentCount: 1, lines: [{
+          parentId: '1234567890123456789', skuOrderId: '2234567890123456789', productName: '测试商品',
+          placedAt: null, merchantCode: null, color: '黑色', size: 'L', variantRole: 'color',
+          quantity: 1, aftersaleStatus: '-', orderStatus: '待发货承诺发货40小时29分钟13秒内发货及揽收',
+          promisedShipAt: null, issues: [],
+        }] }] }] }
+    const first = pendingCaptureFingerprint(capture)
+    const line = capture.partitions[0].pages[0].lines[0]
+    line.orderStatus = '待发货承诺发货40小时28分钟41秒内发货及揽收'
+    assert.equal(pendingCaptureFingerprint(capture), first)
+    line.quantity = 2
+    assert.notEqual(pendingCaptureFingerprint(capture), first)
+    line.quantity = 1
+    line.orderStatus = '已发货'
+    assert.notEqual(pendingCaptureFingerprint(capture), first)
+  })
   it('reads structured SKU property names and values without a colour list', () => {
     assert.deepEqual(parseStructuredVariant({ sku_properties: [
       { name: '颜色分类', value: '月影蓝' }, { name: '尺码', value: '加大号' },
     ] }), { color: '月影蓝', size: '加大号', role: 'color' })
     assert.deepEqual(parseStructuredVariant({ color: '雾松绿', size: '110cm' }),
       { color: '雾松绿', size: '110cm', role: 'color' })
+    assert.deepEqual(parseStructuredVariant({ sku_spec: [
+      { name: '颜色分类', value: '【男款】黑灰（1件装）' },
+      { name: '尺码大小', value: 'XL(110-130斤)' },
+    ] }), { color: '【男款】黑灰（1件装）', size: 'XL', role: 'color' })
     assert.deepEqual(parseStructuredVariant({ sku_spec: '雾松绿/5XL' }),
       { color: '雾松绿', size: '5XL', role: 'color' })
     assert.deepEqual(parseStructuredVariant({ sku_spec: '女-鸿运套装/2XL' }),

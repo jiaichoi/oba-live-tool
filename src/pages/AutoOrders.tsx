@@ -39,9 +39,7 @@ export default function AutoOrders() {
   const connected = status?.phase === 'logged-in-unverified'
   const refreshView = useCallback(async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8765/api/pending-view', { cache: 'no-store' })
-      if (!response.ok) throw new Error('pending view unavailable')
-      setView(await response.json() as DueView)
+      setView(await window.ipcRenderer.invoke(IPC_CHANNELS.orderExport.getPendingView) as DueView)
       setViewError(false)
     } catch { setViewError(true) }
   }, [])

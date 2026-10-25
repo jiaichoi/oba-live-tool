@@ -81,6 +81,7 @@ export const IPC_CHANNELS = {
     probeOrderPage: 'orderExport:probeOrderPage',
     capturePendingRows: 'orderExport:capturePendingRows',
     organizePending: 'orderExport:organizePending',
+    getPendingView: 'orderExport:getPendingView',
     getStatus: 'orderExport:getStatus',
     status: 'orderExport:status',
     downloaded: 'orderExport:downloaded',

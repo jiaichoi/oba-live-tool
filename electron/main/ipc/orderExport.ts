@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, chmod, writeFile, copyFile, rename, stat } from 'node:fs/promises'
+import { mkdir, chmod, writeFile, copyFile, rename, stat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { app, ipcMain } from 'electron'
 import type { Browser, BrowserContext, Page } from 'playwright'
@@ -7,7 +7,7 @@ import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
 import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
-import { capturePendingOrderPages, parseStructuredVariant, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
+import { capturePendingOrderPages, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import windowManager from '../windowManager'
 
@@ -28,11 +28,26 @@ type OrganizedRow = { shop_order_id: string; sku_order_id: string; product_id: s
   variant_role: 'color' | 'raw_spec'; variant_review_reason: string;
   quantity: number; source_spec: string; status: string }
 
+function shopIdFromEvidence(evidence: OrderNetworkEvidence[]): string | null {
+  const ids = new Set<string>()
+  const walk = (value: unknown) => {
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) { value.forEach(walk); return }
+    const record = value as Record<string, unknown>
+    const trace = record.trace_data as { shop_id?: unknown } | undefined
+    if (trace && /^\d{5,}$/.test(String(trace.shop_id ?? ''))) ids.add(String(trace.shop_id))
+    Object.values(record).forEach(walk)
+  }
+  evidence.filter(item => item.path.endsWith('/b/a/api/v1/reach/list')).forEach(item => walk(item.fields))
+  return ids.size === 1 ? [...ids][0] : null
+}
+
 export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetworkEvidence[]): OrganizedRow[] {
   const partition = capture.partitions[0]
-  if (!partition || capture.partitions.length !== 1 || partition.key !== 'recent_6_months' ||
+  if (!capture.complete || !/^\d{5,}$/.test(String(capture.visibleShopId ?? '')) ||
+      !partition || capture.partitions.length !== 1 || partition.key !== 'recent_6_months' ||
       partition.displayedPendingCount === null || !partition.endedAtLastPage)
-    throw new Error('近6个月待发货范围或分页未读全')
+    throw new Error('店铺身份、近6个月待发货范围或分页未读全')
   if (partition.displayedPendingCount === 0) {
     if (!partition.emptyStateConfirmed || partition.issues.length) throw new Error('0单未通过空表状态核对')
     return []
@@ -97,7 +112,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
 }
 
 async function publishOrganized(capture: PendingOrderCapture, rows: OrganizedRow[]) {
-  const data = path.join(app.getPath('appData'), 'TutianDuoOrderWorkbench', 'data')
+  const data = path.join(app.getPath('userData'), 'workbench-data')
   await mkdir(data, { recursive: true, mode: 0o700 })
   const target = path.join(data, 'partial_due.json')
   const temporary = path.join(data, `partial_due.${randomUUID()}.json`)
@@ -111,6 +126,29 @@ async function publishOrganized(capture: PendingOrderCapture, rows: OrganizedRow
   if (await stat(target).then(() => true).catch(() => false))
     await copyFile(target, path.join(data, `partial_due.before_${Date.now()}.json`))
   await rename(temporary, target)
+}
+
+async function pendingView() {
+  const source = path.join(app.getPath('userData'), 'workbench-data', 'partial_due.json')
+  try {
+    const candidate = JSON.parse(await readFile(source, 'utf8')) as Record<string, unknown>
+    const rows = candidate.rows
+    if (candidate.scope !== 'recent_6_months_pending' || candidate.page_complete !== true ||
+        !Array.isArray(rows) || !/^\d+$/.test(String(candidate.shop_id_verified ?? '')) ||
+        !Number.isInteger(Number(candidate.displayed_parent_count))) return { available: false }
+    const unique = new Set<string>()
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') return { available: false }
+      const entry = row as Record<string, unknown>
+      const id = String(entry.sku_order_id ?? '')
+      if (!/^\d{19}$/.test(id) || unique.has(id) || !entry.product_name || !entry.color || !entry.size ||
+          !Number.isInteger(Number(entry.quantity)) || Number(entry.quantity) < 1) return { available: false }
+      unique.add(id)
+    }
+    if (rows.length === 0 && candidate.empty_state_confirmed !== true) return { available: false }
+    return { available: true, scope: candidate.scope, observed_at: candidate.observed_at,
+      page_complete: true, displayed_parent_count: candidate.displayed_parent_count, rows }
+  } catch { return { available: false } }
 }
 
 async function saveReviewCandidate(accountId: string, capture: PendingOrderCapture, networkEvidence: OrderNetworkEvidence[]) {
@@ -236,6 +274,7 @@ async function closeSession(accountId: string) {
 }
 
 export function setupOrderExportIpcHandlers() {
+  ipcMain.handle(IPC_CHANNELS.orderExport.getPendingView, pendingView)
   ipcMain.handle(IPC_CHANNELS.orderExport.getStatus, (_event, accountId: string) => statusOf(accountId))
   ipcMain.handle(IPC_CHANNELS.orderExport.check, (_event, accountId: string) => inspectLogin(accountId))
   ipcMain.handle(IPC_CHANNELS.orderExport.probeOrderPage, async (_event, accountId: string) => {
@@ -282,7 +321,15 @@ export function setupOrderExportIpcHandlers() {
       await page.getByRole('tab', { name: /待发货/ }).first()
         .waitFor({ state: 'visible', timeout: 30000 })
       const capture = await capturePendingOrderPages(page)
+      const check = await capturePendingOrderPages(page)
       const evidence = await stopObserving()
+      if (pendingCaptureFingerprint(capture) !== pendingCaptureFingerprint(check))
+        throw new Error('两次逐页读取的订单身份、状态或数量不一致；旧快照未改动')
+      const observedShopId = shopIdFromEvidence(evidence)
+      if (capture.visibleShopId && observedShopId && capture.visibleShopId !== observedShopId)
+        throw new Error('页面与官方会话中的店铺 ID 不一致；旧快照未改动')
+      capture.visibleShopId = capture.visibleShopId ?? observedShopId
+      capture.complete = Boolean(capture.visibleShopId)
       let rows: OrganizedRow[]
       try { rows = organizedRows(capture, evidence) }
       catch (error) {
