@@ -8,6 +8,10 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+build/
+.release-python/
+*.tsbuildinfo
+**/__pycache__/
 dist
 dist-ssr
 dist-electron
@@ -25,7 +29,6 @@ release
 *.sw?
 
 #lockfile
-package-lock.json
 pnpm-lock.yaml
 yarn.lock
 /test-results/

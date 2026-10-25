@@ -191,6 +191,16 @@ export interface IpcChannels {
     empty?: boolean
     observedAt?: string
   }>
+  [IPC_CHANNELS.orderExport.getPendingView]: () => Promise<{
+    available: boolean
+    scope?: string
+    observed_at?: string
+    page_complete?: boolean
+    displayed_parent_count?: number
+    rows?: Array<{ shop_order_id: string; sku_order_id: string; merchant_code: string;
+      product_id: string; product_name: string; color: string; size: string; quantity: number;
+      variant_role?: 'color' | 'raw_spec'; variant_review_reason?: string }>
+  }>
   [IPC_CHANNELS.orderExport.getStatus]: (accountId: string) => Promise<{
     accountId: string
     phase: 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'

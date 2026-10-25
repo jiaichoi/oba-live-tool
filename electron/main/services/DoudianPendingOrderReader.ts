@@ -37,11 +37,50 @@ export type PendingOrderCapture = {
   startedAt: string
   finishedAt: string
   partitions: CapturedPartition[]
-  complete: false
+  complete: boolean
   issues: string[]
 }
 
+/** The page appends a live shipping countdown to the stable pending status. */
+export function pendingCaptureFingerprint(capture: PendingOrderCapture): string {
+  return JSON.stringify(capture.partitions.map(partition => ({
+    count: partition.displayedPendingCount,
+    lastPage: partition.endedAtLastPage,
+    pages: partition.pages.map(page => ({ number: page.number, parents: page.parentCount,
+      lines: page.lines.map(line => [line.parentId, line.skuOrderId, line.productName,
+        line.quantity, line.orderStatus.startsWith('待发货') ? '待发货' : line.orderStatus,
+        line.aftersaleStatus]) })),
+  })))
+}
+
 type RawRow = { className: string; rowKey?: string; cells: string[]; statusTitles?: string[] }
+
+async function waitForPendingListResponse(page: Page): Promise<string[]> {
+  const response = await page.waitForResponse(async candidate => {
+    try {
+      const url = new URL(candidate.url())
+      if (url.hostname !== 'fxg.jinritemai.com' || !url.pathname.endsWith('/api/order/searchlist') ||
+          candidate.status() !== 200) return false
+      const body = await candidate.json() as { data?: Array<Record<string, unknown>> }
+      return Array.isArray(body.data) && body.data.every(parent =>
+        (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text === '待发货')
+    } catch { return false }
+  }, { timeout: 30000 })
+  const body = await response.json() as { data: Array<Record<string, unknown>> }
+  const ids = body.data.map(parent => String(parent.shop_order_id ?? ''))
+  if (ids.some(id => !/^\d{19}$/.test(id)) || new Set(ids).size !== ids.length)
+    throw new Error('官方待发货列表的主订单编号无效或重复')
+  return ids
+}
+
+async function waitForMatchingTable(page: Page, expectedIds: string[]): Promise<void> {
+  await page.waitForFunction(expected => {
+    if (document.querySelector('.auxo-spin-spinning')) return false
+    const parents = Array.from(document.querySelectorAll('tr.auxo-table-row-level-0'))
+    const actual = parents.map(row => row.querySelector('td:nth-child(2)')?.textContent?.match(/\d{19}/)?.[0] ?? '')
+    return actual.length === expected.length && actual.every((id, index) => id === expected[index])
+  }, expectedIds, { timeout: 30000 })
+}
 
 function onlyDigits(value: string): string | null {
   return value.match(/\d{15,}/)?.[0] ?? null
@@ -60,7 +99,14 @@ export function parseStructuredVariant(item: Record<string, unknown>): { color: 
       found.color.add(text)
       explicitColor = true
     }
-    if (/^(?:size|size_name|sku_size|尺码|尺寸|大小)$/iu.test(role)) found.size.add(text)
+    if (/^(?:size|size_name|sku_size|尺码|尺码大小|尺寸|大小)$/iu.test(role)) {
+      // The official SKU dimension can append a weight guide, e.g. XL(110-130斤).
+      // Keep the original value in the review evidence and use only its size token here.
+      const size = text.split(/[（(]/u, 1)[0].trim()
+      found.size.add(SIZE_TOKEN.test(size)
+        ? (/^(?:[2-9]?XL|[2-9]?XS|S|M|L)$/iu.test(size) ? size.toUpperCase() : size)
+        : text)
+    }
   }
   const walk = (value: unknown, depth: number) => {
     if (depth > 4 || !value || typeof value !== 'object') return
@@ -223,11 +269,14 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
       await alternateStatus.click({ timeout: 5000 })
       await page.locator('.auxo-spin-spinning').first().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined)
     }
+    const firstResponse = waitForPendingListResponse(page)
     try { await pending.click({ timeout: 5000 }) } catch {
+      await firstResponse.catch(() => undefined)
       partition.issues.push(`${key} 待发货状态标签切换时消失；此分区未采集`)
       result.partitions.push(partition)
       continue
     }
+    let expectedPageIds = await firstResponse
     await page.locator('.auxo-spin-spinning').first().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined)
     const pendingText = await pending.innerText({ timeout: 5000 }).catch(() => '')
     if (!pendingText) {
@@ -241,6 +290,7 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
       Boolean(node.closest('.auxo-tabs-tab-active')))
     if (!pendingSelected) partition.issues.push('未证明待发货筛选处于选中状态')
     if (displayedPendingCount === 0) {
+      if (expectedPageIds.length !== 0) partition.issues.push('页面显示0单，但官方列表响应仍有订单')
       const recentSelected = await tab.evaluate(node => node.getAttribute('aria-selected') === 'true' ||
         Boolean(node.closest('.auxo-tabs-tab-active')))
       const emptyText = await page.locator('tr.auxo-table-placeholder').first().innerText().catch(() => '')
@@ -252,23 +302,14 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
       result.partitions.push(partition)
       continue
     }
-    // The tab count can update before the order table. Do not parse rows from the
-    // previous filter or attempt pagination while the table overlay is still active.
-    await page.waitForFunction(expected => {
-      const count = document.querySelectorAll('tr.auxo-table-row-level-0').length
-      return count > 0 && count <= expected && !document.querySelector('.auxo-spin-spinning')
-    }, displayedPendingCount, { timeout: 30000 })
-    await page.locator('table tbody tr').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => undefined)
+    if (expectedPageIds.length === 0) throw new Error('页面显示待发货订单，但官方列表响应为空')
+    // The status count can change before the table. Match every displayed parent
+    // against the response from this particular filter/page navigation.
+    await waitForMatchingTable(page, expectedPageIds)
     const seen = new Set<string>()
-    let previousFirstParentId = ''
     for (let number = 1; number <= MAX_PAGES; number++) {
       if (!currentUrlIsOrderPage(page)) throw new Error('读取过程中离开了官方订单列表页')
-      if (previousFirstParentId) {
-        await page.waitForFunction(previous => {
-          const first = document.querySelector('tr.auxo-table-row-level-0 td:nth-child(2)')?.textContent || ''
-          return Boolean(first.match(/\d{19}/)?.[0]) && !first.includes(previous)
-        }, previousFirstParentId, { timeout: 15000 })
-      }
+      await waitForMatchingTable(page, expectedPageIds)
       // The status-tab count and pagination can advance before the table rows
       // finish changing. An old all-status page may contain paid or closed
       // orders while the pending tab already displays its new count.
@@ -289,7 +330,6 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
           .map(node => node.getAttribute('title') || node.getAttribute('aria-label') || '').slice(0, 6),
       })))
       const parsed = parseVisibleRows(raw)
-      previousFirstParentId = parsed.lines[0]?.parentId || ''
       for (const line of parsed.lines) {
         const key = `${line.parentId}:${line.skuOrderId || line.productName}`
         if (seen.has(key)) partition.issues.push(`商品行跨页重复：${key}`)
@@ -303,25 +343,28 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
         break
       }
       const next = page.locator('li.auxo-pagination-next').first()
-      if (await next.count() === 0) {
-        partition.endedAtLastPage = true
-        break
-      }
-      const disabled = await next.evaluate(node => node.classList.contains('auxo-pagination-disabled') ||
-        node.getAttribute('aria-disabled') === 'true' || Boolean(node.querySelector('button:disabled')))
-      if (disabled) {
-        partition.endedAtLastPage = true
+      const nextReady = await page.waitForFunction(() => {
+        const node = document.querySelector('li.auxo-pagination-next')
+        return Boolean(node && !node.classList.contains('auxo-pagination-disabled') &&
+          node.getAttribute('aria-disabled') !== 'true' && !node.querySelector('button:disabled'))
+      }, undefined, { timeout: 15000 }).then(() => true).catch(() => false)
+      if (!nextReady) {
+        partition.issues.push(`页面显示 ${partition.displayedPendingCount} 个待发货主订单，已读 ${observedSoFar} 个，但下一页不可用`)
         break
       }
       const active = page.locator('li.auxo-pagination-item-active').first()
       const before = await active.innerText().catch(() => String(number))
+      const nextResponse = waitForPendingListResponse(page)
       await next.locator('button').click()
+      expectedPageIds = await nextResponse
       await page.waitForFunction(previous => {
         const active = document.querySelector('li.auxo-pagination-item-active')
         return active?.textContent?.trim() !== previous
       }, before, { timeout: 15000 })
+      await waitForMatchingTable(page, expectedPageIds)
     }
-    if (!partition.endedAtLastPage) partition.issues.push(`达到 ${MAX_PAGES} 页安全上限，未证明完整`)
+    if (!partition.endedAtLastPage && partition.pages.length >= MAX_PAGES)
+      partition.issues.push(`达到 ${MAX_PAGES} 页安全上限，未证明完整`)
     const observedParents = partition.pages.reduce((sum, current) => sum + current.parentCount, 0)
     if (partition.displayedPendingCount !== null && partition.displayedPendingCount !== observedParents)
       partition.issues.push(`主订单数不符：页面 ${partition.displayedPendingCount}，读取 ${observedParents}`)

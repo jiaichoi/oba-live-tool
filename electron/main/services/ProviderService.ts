@@ -30,11 +30,10 @@ const PROVIDERS_CACHE_FILE = 'providers.cache.json'
 
 export class ProviderService {
   private logger = createLogger('ProviderService')
-  private cachePath: string
   private _providers: Record<string, ProviderInfo> = { ...defaultProviders }
 
-  constructor() {
-    this.cachePath = path.join(app.getPath('userData'), PROVIDERS_CACHE_FILE)
+  private get cachePath() {
+    return path.join(app.getPath('userData'), PROVIDERS_CACHE_FILE)
   }
 
   get providers(): Record<string, ProviderInfo> {

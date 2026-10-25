@@ -1060,6 +1060,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html("Invalid Host", 403)
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/health":
+            data = json.dumps({"service": "tutianduo-order-workbench", "data_dir": str(DATA)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return self.wfile.write(data)
         if path == "/api/pending-view":
             return self.send_pending_view()
         if path in ("/login", "/logout", "/setup"):
