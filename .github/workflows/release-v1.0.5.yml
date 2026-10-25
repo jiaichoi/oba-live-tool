@@ -1,0 +1,56 @@
+name: Publish v1.0.5 macOS installer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v1.0.5.yml
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.event.head_commit.message == 'release: publish v1.0.5 installer'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Bundle blank local order workbench
+        run: |
+          python -m pip install pyinstaller==6.22.3
+          python -m PyInstaller --onedir --console --name tutianduo-workbench --distpath build/workbench-v1.0.3-dist --workpath build/workbench-v1.0.3-tmp --specpath build/workbench-v1.0.3-spec workbench/app.py
+      - name: Type-check and build macOS installer
+        run: npm run build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish v1.0.5 assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.5
+          target_commitish: ${{ github.sha }}
+          name: 线上经营工具 v1.0.5
+          body: |
+            修复官方 SKU 规格与页面商品行核对中的误判。仍核对订单、数量、状态和分页。
+            空白安装包不含真实订单、店铺登录信息、验证码或 ZIP 密码。
+            本地类型检查、相关测试和旧失败快照回放通过；真实店铺全量同步需安装后验证。
+            macOS 包未使用 Developer ID 签名或公证。
+          files: |
+            release/*/*.dmg
+            release/*/*.blockmap
+            release/*/latest*.yml
+          fail_on_unmatched_files: true
