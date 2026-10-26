@@ -10,7 +10,12 @@ type Status = { accountId: string; phase: string; message: string }
 type Result = { ok: boolean; message: string; localPath?: string }
 type DueRow = { shop_order_id: string; sku_order_id: string; merchant_code: string; product_id: string; product_name: string;
   color: string; size: string; quantity: number; variant_role?: 'color' | 'raw_spec'; variant_review_reason?: string }
-type DueView = { available: boolean; scope?: string; observed_at?: string; page_complete?: boolean; displayed_parent_count?: number; rows?: DueRow[] }
+type DueView = { available: boolean; scope?: string; observed_at?: string; page_complete?: boolean;
+  displayed_parent_count?: number; shop_id_verified?: string; account_bound?: boolean; rows?: DueRow[] }
+type PlacementEntry = { sku_order_id: string; source_quantity: number; placed_quantity: number; batch_id: string; placed_at: string }
+type PlacementBatch = { id: string; at: string; snapshot_observed_at: string; undone_at?: string; entries: PlacementEntry[] }
+type Placement = { ok: boolean; message?: string; observed_at?: string;
+  ledger?: { batches: PlacementBatch[] }; preview?: { already_confirmed: boolean } }
 function sizeOrder(value: string): [number, number | string] {
   const size = value.toUpperCase()
   const known: Record<string, number> = { XS: 0, S: 1, M: 2, L: 3, XL: 4 }
@@ -36,13 +41,19 @@ export default function AutoOrders() {
   const [result, setResult] = useState<Result | null>(null)
   const [view, setView] = useState<DueView | null>(null)
   const [viewError, setViewError] = useState(false)
+  const [placement, setPlacement] = useState<Placement | null>(null)
+  const [exceptions, setExceptions] = useState<Record<string, number>>({})
+  const [showDetails, setShowDetails] = useState(false)
   const connected = status?.phase === 'logged-in-unverified'
   const refreshView = useCallback(async () => {
     try {
-      setView(await window.ipcRenderer.invoke(IPC_CHANNELS.orderExport.getPendingView) as DueView)
+      setView(await window.ipcRenderer.invoke(IPC_CHANNELS.orderExport.getPendingView, accountId) as DueView)
       setViewError(false)
     } catch { setViewError(true) }
-  }, [])
+  }, [accountId])
+  const refreshPlacement = useCallback(async () => {
+    setPlacement(await window.ipcRenderer.invoke(IPC_CHANNELS.orderExport.getPlacement, accountId) as Placement)
+  }, [accountId])
   useEffect(() => {
     let active = true
     setResult(null)
@@ -53,8 +64,9 @@ export default function AutoOrders() {
       if (value.accountId === accountId) setStatus(value)
     })
     void refreshView()
+    void refreshPlacement()
     return () => { active = false; remove() }
-  }, [accountId, refreshView])
+  }, [accountId, refreshView, refreshPlacement])
   const run = async (kind: 'organize' | 'probe' | 'capture') => {
     setBusy(true)
     setResult(null)
@@ -67,11 +79,44 @@ export default function AutoOrders() {
         value = { ok: probe.ok, message: `${probe.message} 页面文字显示待发货 ${probe.visiblePendingMainOrderCount ?? '待核'}。此项只检查页面，不更新矩阵。` }
       }
       setResult(value)
-      if (kind === 'organize' && value.ok) await refreshView()
+      if (kind === 'organize' && value.ok) { await refreshView(); await refreshPlacement() }
     } catch { setResult({ ok: false, message: '订单页面读取失败；上次结果保持不变。' }) }
     finally { setBusy(false) }
   }
   const rows = view?.available && view.scope === 'recent_6_months_pending' && Array.isArray(view.rows) ? view.rows : []
+  const draftKey = view?.account_bound && view?.observed_at && view?.shop_id_verified
+    ? `placement-exceptions:${accountId}:${view.shop_id_verified}:${view.observed_at}` : ''
+  useEffect(() => {
+    if (!draftKey) { setExceptions({}); return }
+    try { setExceptions(JSON.parse(localStorage.getItem(draftKey) || '{}') as Record<string, number>) }
+    catch { setExceptions({}) }
+  }, [draftKey])
+  const setException = (id: string, count: number) => {
+    const next = { ...exceptions, [id]: count }
+    setExceptions(next)
+    if (draftKey) localStorage.setItem(draftKey, JSON.stringify(next))
+  }
+  const alreadyConfirmed = Boolean(placement?.preview?.already_confirmed)
+  const toPlace = alreadyConfirmed ? 0 : rows.reduce((sum, row) => sum + Math.max(0,
+    Number(row.quantity) - (exceptions[row.sku_order_id] ?? 0)), 0)
+  const exceptionCount = rows.reduce((sum, row) => sum + (exceptions[row.sku_order_id] ?? 0), 0)
+  const confirm = async () => {
+    if (!placement?.ok || !view?.observed_at || !toPlace || alreadyConfirmed) return
+    if (!window.confirm(`请确认这些订单已经在 ERP 人工下单。\n本次标记 ${toPlace} 件已下单，${exceptionCount} 件本次不下单。\n此操作只记录本机状态，不会在 ERP 创建订单。`)) return
+    setBusy(true)
+    try {
+      const value = await window.ipcRenderer.invoke(IPC_CHANNELS.orderExport.confirmPlacement,
+        accountId, view.observed_at, exceptions) as Result
+      setResult(value)
+      await refreshPlacement()
+    } catch { setResult({ ok: false, message: '本地下单确认失败；请重新检查。' }) }
+    finally { setBusy(false) }
+  }
+  const undo = async (id: string) => {
+    if (!window.confirm('只撤销本机标记，不会撤销 ERP 真实订单。确定继续？')) return
+    const value = await window.ipcRenderer.invoke(IPC_CHANNELS.orderExport.undoPlacement, accountId, id) as Result
+    setResult(value); await refreshPlacement()
+  }
   const sizes = useMemo(() => [...new Set(rows.map(row => row.size).filter(Boolean))].sort(compareSizes), [rows])
   const groups = useMemo(() => {
     const values = new Map<string, { row: DueRow; sizes: Record<string, number>; children: number; quantity: number }>()
@@ -115,13 +160,41 @@ export default function AutoOrders() {
         : <>
           <p className="text-lg font-semibold">{parents} 个主订单、{rows.length} 个商品子订单、源订单数量 {quantity}</p>
           <p className="mt-2 text-sm text-muted-foreground">读取时间：{observed}（北京时间） · 范围：近6个月待发货 · {view.page_complete ? '本次页面已读全' : '部分已读取'}</p>
-          <p className="mt-1 text-sm text-muted-foreground">页面当时显示主订单 {view.displayed_parent_count ?? '待核'} 个；店铺 ID 尚待核实。这是读取时点快照，不代表实时同步。</p>
+          <p className="mt-1 text-sm text-muted-foreground">页面当时显示主订单 {view.displayed_parent_count ?? '待核'} 个；店铺 ID：{view.shop_id_verified ?? '待核'}。这是读取时点快照，不代表实时同步。</p>
+          <div className="mt-4 rounded-lg border p-4 space-y-2">
+            <p className="font-semibold">ERP 人工下单进度</p>
+            <p className="text-sm">待发货原始数量始终为 {quantity} 件；本次可确认 {toPlace} 件，本次不下单 {exceptionCount} 件。每次重新整理形成新批次，不自动扣除此前已下单记录。</p>
+            {!view.account_bound || !placement?.ok ? <p role="status" className="text-amber-700">{placement?.message || '当前快照未绑定本机账号；请先重新整理订单。'}</p> : null}
+            {alreadyConfirmed && <p role="status" className="text-emerald-700">这次整理快照已确认。若今天还有新一轮 ERP 下单，请先点“开始整理”获取新快照。</p>}
+            <p className="text-xs text-muted-foreground">点击尺码数量可将该格全部标为“本次不下单”；展开子订单可调整部分数量。请先在 ERP 完成人工下单，再确认。</p>
+            <div className="flex gap-2"><Button variant="outline" onClick={() => setShowDetails(value => !value)}>{showDetails ? '收起子订单' : '查看子订单与部分例外'}</Button>
+              <Button disabled={busy || !placement?.ok || !toPlace || alreadyConfirmed} onClick={() => void confirm()}>完成下单</Button></div>
+            {showDetails && <div className="max-h-72 overflow-auto space-y-2">{rows.map(row => <div key={row.sku_order_id} className="flex flex-wrap items-center gap-2 border-t pt-2 text-xs">
+              <span>{row.shop_order_id} / {row.sku_order_id} · {row.merchant_code || row.product_name} · {row.color}/{row.size} · {row.quantity} 件</span>
+              <label>本次不下单 <input className="w-16 rounded border p-1" type="number" min="0" max={row.quantity} step="1" value={exceptions[row.sku_order_id] ?? 0}
+                onChange={event => setException(row.sku_order_id, Number(event.target.value))} /></label>
+            </div>)}</div>}
+            {(placement?.ledger?.batches ?? []).filter(batch => !batch.undone_at).slice(-1).map(batch =>
+              <Button key={batch.id} variant="ghost" size="sm" onClick={() => void undo(batch.id)}>撤销最近一次本机确认</Button>)}
+          </div>
           {rows.length === 0 ? <p className="mt-5">本次待发货 0 单。</p> :
             <div className="mt-5 overflow-x-auto"><table className="w-full border-collapse text-sm">
               <thead><tr className="bg-slate-50"><th className="p-3 text-left">商家编码或商品名称 · 颜色/款式/原规格</th>{sizes.map(size => <th key={size} className="p-3 text-center">{size}</th>)}<th className="p-3 text-center">源订单数量</th><th className="p-3 text-center">商品子订单</th></tr></thead>
               <tbody>{groups.map(group => <tr key={JSON.stringify([group.row.product_id, group.row.merchant_code, group.row.product_name, group.row.color, group.row.variant_role])} className="border-t">
                 <td className="p-3"><div className="font-medium">{group.row.merchant_code || group.row.product_name} · {group.row.variant_role === 'raw_spec' ? '原规格：' : ''}{group.row.color}</div><div className="text-xs text-muted-foreground">{group.row.merchant_code ? '商家编码' : '商家编码未填写；按商品名称展示'}｜商品 ID：{group.row.product_id}{group.row.variant_review_reason ? `｜${group.row.variant_review_reason}` : ''}</div></td>
-                {sizes.map(size => <td key={size} className="p-3 text-center">{group.sizes[size] || '—'}</td>)}
+                {sizes.map(size => {
+                  const members = rows.filter(row => row.product_id === group.row.product_id && row.merchant_code === group.row.merchant_code &&
+                    row.product_name === group.row.product_name && row.color === group.row.color && row.variant_role === group.row.variant_role && row.size === size)
+                  const count = group.sizes[size] || 0
+                  const excepted = members.reduce((sum, row) => sum + (exceptions[row.sku_order_id] ?? 0), 0)
+                  return <td key={size} className="p-3 text-center">{count ? <button type="button" className="rounded border px-2 py-1" disabled={!placement?.ok}
+                    title="点击切换本次全部不下单；部分数量请展开子订单设置" onClick={() => {
+                      const full = excepted !== count
+                      const next = { ...exceptions }
+                      for (const member of members) next[member.sku_order_id] = full ? member.quantity : 0
+                      setExceptions(next); if (draftKey) localStorage.setItem(draftKey, JSON.stringify(next))
+                    }}>{count}{excepted ? ` · 例外${excepted}` : ''}</button> : '—'}</td>
+                })}
                 <td className="p-3 text-center">{group.quantity}</td><td className="p-3 text-center">{group.children}</td>
               </tr>)}</tbody></table></div>}
         </>}

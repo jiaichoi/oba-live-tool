@@ -9,6 +9,8 @@ import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
 import { capturePendingOrderPages, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
+import { confirmPlacement, placementPreview, readPlacementLedger, undoPlacement,
+  validatePlacementSnapshot, writePlacementLedger, type PlacementSnapshot } from '../services/OrderPlacementLedger'
 import windowManager from '../windowManager'
 
 const ORDER_LIST_URL = 'https://fxg.jinritemai.com/ffa/morder/order/list'
@@ -22,6 +24,7 @@ const opening = new Set<string>()
 const statuses = new Map<string, Status>()
 const listeningPages = new WeakSet<Page>()
 const organizing = new Set<string>()
+const placing = new Set<string>()
 
 type OrganizedRow = { shop_order_id: string; sku_order_id: string; product_id: string;
   product_name: string; merchant_code: string; color: string; size: string;
@@ -111,7 +114,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
   return rows
 }
 
-async function publishOrganized(capture: PendingOrderCapture, rows: OrganizedRow[]) {
+async function publishOrganized(accountId: string, capture: PendingOrderCapture, rows: OrganizedRow[]) {
   const data = path.join(app.getPath('userData'), 'workbench-data')
   await mkdir(data, { recursive: true, mode: 0o700 })
   const target = path.join(data, 'partial_due.json')
@@ -121,19 +124,19 @@ async function publishOrganized(capture: PendingOrderCapture, rows: OrganizedRow
     scope: 'recent_6_months_pending', displayed_parent_count: partition.displayedPendingCount,
     official_parent_count: partition.displayedPendingCount, official_item_count: rows.length,
     page_complete: true, empty_state_confirmed: rows.length === 0 ? partition.emptyStateConfirmed : false,
-    shop_id_verified: capture.visibleShopId, rows }
+    shop_id_verified: capture.visibleShopId, account_id: accountId, rows }
   await writeFile(temporary, JSON.stringify(output, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
   if (await stat(target).then(() => true).catch(() => false))
     await copyFile(target, path.join(data, `partial_due.before_${Date.now()}.json`))
   await rename(temporary, target)
 }
 
-async function pendingView() {
+async function pendingView(accountId: string) {
   const source = path.join(app.getPath('userData'), 'workbench-data', 'partial_due.json')
   try {
     const candidate = JSON.parse(await readFile(source, 'utf8')) as Record<string, unknown>
     const rows = candidate.rows
-    if (candidate.scope !== 'recent_6_months_pending' || candidate.page_complete !== true ||
+    if (candidate.account_id !== accountId || candidate.scope !== 'recent_6_months_pending' || candidate.page_complete !== true ||
         !Array.isArray(rows) || !/^\d+$/.test(String(candidate.shop_id_verified ?? '')) ||
         !Number.isInteger(Number(candidate.displayed_parent_count))) return { available: false }
     const unique = new Set<string>()
@@ -147,9 +150,25 @@ async function pendingView() {
     }
     if (rows.length === 0 && candidate.empty_state_confirmed !== true) return { available: false }
     return { available: true, scope: candidate.scope, observed_at: candidate.observed_at,
-      page_complete: true, displayed_parent_count: candidate.displayed_parent_count, rows }
+      page_complete: true, displayed_parent_count: candidate.displayed_parent_count,
+      shop_id_verified: candidate.shop_id_verified,
+      account_bound: true, rows }
   } catch { return { available: false } }
 }
+
+async function placementSnapshot(accountId: string): Promise<PlacementSnapshot> {
+  const view = await pendingView(accountId) as { available: boolean; account_bound?: boolean;
+    shop_id_verified?: unknown; observed_at?: unknown; rows?: unknown }
+  if (!view.available || !view.account_bound) throw new Error('请先在当前账号重新整理订单，核验店铺归属')
+  const snapshot = { account_id: accountId, shop_id_verified: String(view.shop_id_verified),
+    observed_at: String(view.observed_at), page_complete: true as const,
+    rows: (view.rows as OrganizedRow[]).map(row => ({ shop_order_id: row.shop_order_id,
+      sku_order_id: row.sku_order_id, quantity: row.quantity })) }
+  validatePlacementSnapshot(snapshot, accountId)
+  return snapshot
+}
+
+const placementRoot = () => path.join(app.getPath('userData'), 'workbench-data')
 
 async function saveReviewCandidate(accountId: string, capture: PendingOrderCapture, networkEvidence: OrderNetworkEvidence[]) {
   const inbox = path.join(app.getPath('userData'), 'OrderReports', accountId)
@@ -274,7 +293,40 @@ async function closeSession(accountId: string) {
 }
 
 export function setupOrderExportIpcHandlers() {
-  ipcMain.handle(IPC_CHANNELS.orderExport.getPendingView, pendingView)
+  ipcMain.handle(IPC_CHANNELS.orderExport.getPendingView, (_event, accountId: string) => pendingView(accountId))
+  ipcMain.handle(IPC_CHANNELS.orderExport.getPlacement, async (_event, accountId: string) => {
+    try {
+      const snapshot = await placementSnapshot(accountId)
+      const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
+      return { ok: true, ledger, preview: placementPreview(snapshot, ledger, {}), observed_at: snapshot.observed_at }
+    } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '下单记录不可读取' } }
+  })
+  ipcMain.handle(IPC_CHANNELS.orderExport.confirmPlacement, async (_event, accountId: string,
+    expectedObservedAt: string, exceptions: Record<string, number>) => {
+    if (placing.has(accountId)) return { ok: false, message: '已有一次下单确认正在进行' }
+    placing.add(accountId)
+    try {
+      const snapshot = await placementSnapshot(accountId)
+      const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
+      const result = confirmPlacement(snapshot, ledger, exceptions, expectedObservedAt)
+      await writePlacementLedger(placementRoot(), result.ledger)
+      return { ok: true, batch_id: result.batch.id,
+        count: result.batch.entries.reduce((sum, row) => sum + row.placed_quantity, 0),
+        message: '本次非例外订单已记为 ERP 人工已下单；未调用 ERP 或抖店发货接口。' }
+    } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '下单确认失败' } }
+    finally { placing.delete(accountId) }
+  })
+  ipcMain.handle(IPC_CHANNELS.orderExport.undoPlacement, async (_event, accountId: string, batchId: string) => {
+    if (placing.has(accountId)) return { ok: false, message: '已有一次下单记录操作正在进行' }
+    placing.add(accountId)
+    try {
+      const snapshot = await placementSnapshot(accountId)
+      const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
+      await writePlacementLedger(placementRoot(), undoPlacement(ledger, batchId))
+      return { ok: true, message: '已撤销这批本地下单标记；请另行核对真实 ERP 订单。' }
+    } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '撤销失败' } }
+    finally { placing.delete(accountId) }
+  })
   ipcMain.handle(IPC_CHANNELS.orderExport.getStatus, (_event, accountId: string) => statusOf(accountId))
   ipcMain.handle(IPC_CHANNELS.orderExport.check, (_event, accountId: string) => inspectLogin(accountId))
   ipcMain.handle(IPC_CHANNELS.orderExport.probeOrderPage, async (_event, accountId: string) => {
@@ -336,7 +388,7 @@ export function setupOrderExportIpcHandlers() {
         const localPath = await saveReviewCandidate(accountId, capture, evidence)
         throw new Error(`${error instanceof Error ? error.message : '未知错误'}；原始商品规格与待核原因已保存在本机 ${localPath}`)
       }
-      await publishOrganized(capture, rows)
+      await publishOrganized(accountId, capture, rows)
       const parents = new Set(rows.map(row => row.shop_order_id)).size
       return { ok: true, parents, children: rows.length,
         quantity: rows.reduce((sum, row) => sum + row.quantity, 0),

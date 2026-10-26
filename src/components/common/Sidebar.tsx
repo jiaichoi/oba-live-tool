@@ -45,7 +45,7 @@ export default function Sidebar() {
     },
     {
       id: '/orders/shipped',
-      name: '当日已发货',
+      name: '当日已下单',
       icon: <PackageCheck className="w-5 h-5" />,
     },
     {

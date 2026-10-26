@@ -7,6 +7,7 @@ import AutoReplySettings from '@/pages/AutoReply/AutoReplySettings'
 import LiveControl from '@/pages/LiveControl'
 import Workbench from '@/pages/Workbench'
 import AutoOrders from '@/pages/AutoOrders'
+import PlacedOrders from '@/pages/PlacedOrders'
 import ShopConnect from '@/pages/ShopConnect'
 import RedPacket from '@/pages/RedPacket'
 import Settings from '@/pages/SettingsPage'
@@ -31,7 +32,7 @@ export const router = createHashRouter([
       },
       {
         path: '/orders/shipped',
-        element: <Workbench path="/shipped" />,
+        element: <PlacedOrders />,
       },
       {
         path: '/orders/all',
