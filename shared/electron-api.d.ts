@@ -191,15 +191,33 @@ export interface IpcChannels {
     empty?: boolean
     observedAt?: string
   }>
-  [IPC_CHANNELS.orderExport.getPendingView]: () => Promise<{
+  [IPC_CHANNELS.orderExport.getPendingView]: (accountId: string) => Promise<{
     available: boolean
     scope?: string
     observed_at?: string
     page_complete?: boolean
     displayed_parent_count?: number
+    shop_id_verified?: string
+    account_bound?: boolean
     rows?: Array<{ shop_order_id: string; sku_order_id: string; merchant_code: string;
       product_id: string; product_name: string; color: string; size: string; quantity: number;
       variant_role?: 'color' | 'raw_spec'; variant_review_reason?: string }>
+  }>
+  [IPC_CHANNELS.orderExport.getPlacement]: (accountId: string) => Promise<{
+    ok: boolean
+    message?: string
+    observed_at?: string
+    preview?: { already_confirmed: boolean; to_place: number; exceptions: number }
+    ledger?: { account_id: string; shop_id: string; batches: Array<{
+      id: string; at: string; snapshot_observed_at: string; undone_at?: string;
+      entries: Array<{ shop_order_id: string; sku_order_id: string; source_quantity: number;
+        placed_quantity: number; batch_id: string; placed_at: string }>
+    }> }
+  }>
+  [IPC_CHANNELS.orderExport.confirmPlacement]: (accountId: string, expectedObservedAt: string,
+    exceptions: Record<string, number>) => Promise<{ ok: boolean; message: string; batch_id?: string; count?: number }>
+  [IPC_CHANNELS.orderExport.undoPlacement]: (accountId: string, batchId: string) => Promise<{
+    ok: boolean; message: string
   }>
   [IPC_CHANNELS.orderExport.getStatus]: (accountId: string) => Promise<{
     accountId: string
