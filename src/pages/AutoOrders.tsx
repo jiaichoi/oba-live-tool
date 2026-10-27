@@ -5,6 +5,7 @@ import { Title } from '@/components/common/Title'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAccounts } from '@/hooks/useAccounts'
+import { allocateExceptionCount, parseExceptionCount } from './orderExceptionAllocation'
 
 type Status = { accountId: string; phase: string; message: string }
 type Result = { ok: boolean; message: string; localPath?: string }
@@ -43,6 +44,8 @@ export default function AutoOrders() {
   const [viewError, setViewError] = useState(false)
   const [placement, setPlacement] = useState<Placement | null>(null)
   const [exceptions, setExceptions] = useState<Record<string, number>>({})
+  const [cellDrafts, setCellDrafts] = useState<Record<string, string>>({})
+  const [invalidCells, setInvalidCells] = useState<Record<string, boolean>>({})
   const [showDetails, setShowDetails] = useState(false)
   const connected = status?.phase === 'logged-in-unverified'
   const refreshView = useCallback(async () => {
@@ -87,21 +90,36 @@ export default function AutoOrders() {
   const draftKey = view?.account_bound && view?.observed_at && view?.shop_id_verified
     ? `placement-exceptions:${accountId}:${view.shop_id_verified}:${view.observed_at}` : ''
   useEffect(() => {
+    setCellDrafts({})
+    setInvalidCells({})
     if (!draftKey) { setExceptions({}); return }
     try { setExceptions(JSON.parse(localStorage.getItem(draftKey) || '{}') as Record<string, number>) }
     catch { setExceptions({}) }
   }, [draftKey])
   const setException = (id: string, count: number) => {
+    if (!Number.isSafeInteger(count) || count < 0) return
     const next = { ...exceptions, [id]: count }
+    setExceptions(next)
+    setCellDrafts({})
+    setInvalidCells({})
+    if (draftKey) localStorage.setItem(draftKey, JSON.stringify(next))
+  }
+  const setCellException = (key: string, members: DueRow[], sourceQuantity: number, value: string) => {
+    setCellDrafts(current => ({ ...current, [key]: value }))
+    const count = parseExceptionCount(value, sourceQuantity)
+    setInvalidCells(current => ({ ...current, [key]: count === null }))
+    if (count === null) return
+    const next = { ...exceptions, ...allocateExceptionCount(members, count) }
     setExceptions(next)
     if (draftKey) localStorage.setItem(draftKey, JSON.stringify(next))
   }
   const alreadyConfirmed = Boolean(placement?.preview?.already_confirmed)
+  const hasInvalidCell = Object.values(invalidCells).some(Boolean)
   const toPlace = alreadyConfirmed ? 0 : rows.reduce((sum, row) => sum + Math.max(0,
     Number(row.quantity) - (exceptions[row.sku_order_id] ?? 0)), 0)
   const exceptionCount = rows.reduce((sum, row) => sum + (exceptions[row.sku_order_id] ?? 0), 0)
   const confirm = async () => {
-    if (!placement?.ok || !view?.observed_at || !toPlace || alreadyConfirmed) return
+    if (!placement?.ok || !view?.observed_at || !toPlace || alreadyConfirmed || hasInvalidCell) return
     if (!window.confirm(`请确认这些订单已经在 ERP 人工下单。\n本次标记 ${toPlace} 件已下单，${exceptionCount} 件本次不下单。\n此操作只记录本机状态，不会在 ERP 创建订单。`)) return
     setBusy(true)
     try {
@@ -166,13 +184,13 @@ export default function AutoOrders() {
             <p className="text-sm">待发货原始数量始终为 {quantity} 件；本次可确认 {toPlace} 件，本次不下单 {exceptionCount} 件。每次重新整理形成新批次，不自动扣除此前已下单记录。</p>
             {!view.account_bound || !placement?.ok ? <p role="status" className="text-amber-700">{placement?.message || '当前快照未绑定本机账号；请先重新整理订单。'}</p> : null}
             {alreadyConfirmed && <p role="status" className="text-emerald-700">这次整理快照已确认。若今天还有新一轮 ERP 下单，请先点“开始整理”获取新快照。</p>}
-            <p className="text-xs text-muted-foreground">点击尺码数量可将该格全部标为“本次不下单”；展开子订单可调整部分数量。请先在 ERP 完成人工下单，再确认。</p>
+            <p className="text-xs text-muted-foreground">直接在尺码格填写“本次不下单”件数，范围为 0 到该格源订单数量；可确认数量会随之更新。请先在 ERP 完成人工下单，再确认。</p>
             <div className="flex gap-2"><Button variant="outline" onClick={() => setShowDetails(value => !value)}>{showDetails ? '收起子订单' : '查看子订单与部分例外'}</Button>
-              <Button disabled={busy || !placement?.ok || !toPlace || alreadyConfirmed} onClick={() => void confirm()}>完成下单</Button></div>
+              <Button disabled={busy || !placement?.ok || !toPlace || alreadyConfirmed || hasInvalidCell} onClick={() => void confirm()}>完成下单</Button></div>
             {showDetails && <div className="max-h-72 overflow-auto space-y-2">{rows.map(row => <div key={row.sku_order_id} className="flex flex-wrap items-center gap-2 border-t pt-2 text-xs">
               <span>{row.shop_order_id} / {row.sku_order_id} · {row.merchant_code || row.product_name} · {row.color}/{row.size} · {row.quantity} 件</span>
               <label>本次不下单 <input className="w-16 rounded border p-1" type="number" min="0" max={row.quantity} step="1" value={exceptions[row.sku_order_id] ?? 0}
-                onChange={event => setException(row.sku_order_id, Number(event.target.value))} /></label>
+                onChange={event => { const count = parseExceptionCount(event.target.value, row.quantity); if (count !== null) setException(row.sku_order_id, count) }} /></label>
             </div>)}</div>}
             {(placement?.ledger?.batches ?? []).filter(batch => !batch.undone_at).slice(-1).map(batch =>
               <Button key={batch.id} variant="ghost" size="sm" onClick={() => void undo(batch.id)}>撤销最近一次本机确认</Button>)}
@@ -187,13 +205,20 @@ export default function AutoOrders() {
                     row.product_name === group.row.product_name && row.color === group.row.color && row.variant_role === group.row.variant_role && row.size === size)
                   const count = group.sizes[size] || 0
                   const excepted = members.reduce((sum, row) => sum + (exceptions[row.sku_order_id] ?? 0), 0)
-                  return <td key={size} className="p-3 text-center">{count ? <button type="button" className="rounded border px-2 py-1" disabled={!placement?.ok}
-                    title="点击切换本次全部不下单；部分数量请展开子订单设置" onClick={() => {
-                      const full = excepted !== count
-                      const next = { ...exceptions }
-                      for (const member of members) next[member.sku_order_id] = full ? member.quantity : 0
-                      setExceptions(next); if (draftKey) localStorage.setItem(draftKey, JSON.stringify(next))
-                    }}>{count}{excepted ? ` · 例外${excepted}` : ''}</button> : '—'}</td>
+                  const cellKey = JSON.stringify([group.row.product_id, group.row.merchant_code, group.row.product_name,
+                    group.row.color, group.row.variant_role, size])
+                  return <td key={size} className="p-3 text-center">{count ? <div className="flex min-w-28 flex-col items-center gap-1">
+                    <span>源 {count} 件</span>
+                    <label className="flex items-center gap-1 whitespace-nowrap">例外
+                      <input type="number" inputMode="numeric" min="0" max={count} step="1" aria-label={`${group.row.merchant_code || group.row.product_name} ${group.row.color} ${size} 本次不下单件数`}
+                        aria-invalid={Boolean(invalidCells[cellKey])} className={`w-14 rounded border p-1 text-center ${invalidCells[cellKey] ? 'border-red-500' : ''}`}
+                        disabled={!placement?.ok || alreadyConfirmed} value={cellDrafts[cellKey] ?? excepted}
+                        onChange={event => setCellException(cellKey, members, count, event.target.value)}
+                        onBlur={() => { if (invalidCells[cellKey]) { setCellDrafts(current => { const next = { ...current }; delete next[cellKey]; return next }); setInvalidCells(current => { const next = { ...current }; delete next[cellKey]; return next }) } }} />
+                    </label>
+                    <span className="text-xs text-muted-foreground">可确认 {count - excepted} 件</span>
+                    {invalidCells[cellKey] && <span role="alert" className="text-xs text-red-700">填 0 至 {count} 的整数</span>}
+                  </div> : '—'}</td>
                 })}
                 <td className="p-3 text-center">{group.quantity}</td><td className="p-3 text-center">{group.children}</td>
               </tr>)}</tbody></table></div>}
