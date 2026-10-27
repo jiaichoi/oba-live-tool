@@ -11,6 +11,7 @@ import { capturePendingOrderPages, officialVariantMatchesVisibleLine, parseStruc
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import { confirmPlacement, placementPreview, readPlacementLedger, undoPlacement,
   validatePlacementSnapshot, writePlacementLedger, type PlacementSnapshot } from '../services/OrderPlacementLedger'
+import { readPlacedOrderMetadata } from '../services/PlacedOrderMetadata'
 import windowManager from '../windowManager'
 
 const ORDER_LIST_URL = 'https://fxg.jinritemai.com/ffa/morder/order/list'
@@ -298,7 +299,9 @@ export function setupOrderExportIpcHandlers() {
     try {
       const snapshot = await placementSnapshot(accountId)
       const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
-      return { ok: true, ledger, preview: placementPreview(snapshot, ledger, {}), observed_at: snapshot.observed_at }
+      const order_metadata = await readPlacedOrderMetadata(placementRoot(), accountId, snapshot.shop_id_verified, ledger.batches)
+      return { ok: true, ledger, order_metadata,
+        preview: placementPreview(snapshot, ledger, {}), observed_at: snapshot.observed_at }
     } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '下单记录不可读取' } }
   })
   ipcMain.handle(IPC_CHANNELS.orderExport.confirmPlacement, async (_event, accountId: string,
