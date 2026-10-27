@@ -4,12 +4,14 @@ import { allocateExceptionCount, parseExceptionCount } from './orderExceptionAll
 import { confirmPlacement } from '../../electron/main/services/OrderPlacementLedger'
 
 describe('matrix exception quantity', () => {
-  const members = [{ sku_order_id: 'b', quantity: 10 }, { sku_order_id: 'a', quantity: 15 }]
+  const members: { sku_order_id: string; quantity: number }[] = [
+    { sku_order_id: 'b', quantity: 10 }, { sku_order_id: 'a', quantity: 15 },
+  ]
 
   it('assigns 5 of 25 as exceptions and leaves 20 for the existing ledger', () => {
     const allocated = allocateExceptionCount(members, 5)
-    assert.deepEqual(allocated, { a: 5, b: 0 })
     assert.equal(members.reduce((sum, member) => sum + member.quantity - allocated[member.sku_order_id], 0), 20)
+    assert.deepEqual(allocated, { a: 5, b: 0 })
     const snapshot = { account_id: 'demo', shop_id_verified: '123456789', observed_at: '2026-10-27T02:00:00Z',
       page_complete: true as const, rows: [
         { shop_order_id: '1234567890123456789', sku_order_id: 'a', quantity: 15 },
