@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAccounts } from '@/hooks/useAccounts'
 import { allocateExceptionCount, parseExceptionCount } from './orderExceptionAllocation'
+import { compareSizes, groupMatrixRows, matrixRowKey } from './orderMatrix'
 
 type Status = { accountId: string; phase: string; message: string }
 type Result = { ok: boolean; message: string; localPath?: string }
@@ -17,23 +18,6 @@ type PlacementEntry = { sku_order_id: string; source_quantity: number; placed_qu
 type PlacementBatch = { id: string; at: string; snapshot_observed_at: string; undone_at?: string; entries: PlacementEntry[] }
 type Placement = { ok: boolean; message?: string; observed_at?: string;
   ledger?: { batches: PlacementBatch[] }; preview?: { already_confirmed: boolean } }
-function sizeOrder(value: string): [number, number | string] {
-  const size = value.toUpperCase()
-  const known: Record<string, number> = { XS: 0, S: 1, M: 2, L: 3, XL: 4 }
-  if (size in known) return [0, known[size]]
-  const multiple = size.match(/^(\d{1,2})XL$/)
-  if (multiple) return [0, 3 + Number(multiple[1])]
-  const numeric = size.match(/^(\d{2,3})(?:CM|厘米|码)$/)
-  if (numeric) return [1, Number(numeric[1])]
-  return [2, size]
-}
-
-function compareSizes(a: string, b: string): number {
-  const left = sizeOrder(a)
-  const right = sizeOrder(b)
-  return left[0] - right[0] || (typeof left[1] === 'number' && typeof right[1] === 'number'
-    ? left[1] - right[1] : String(left[1]).localeCompare(String(right[1]), 'zh-CN'))
-}
 
 export default function AutoOrders() {
   const accountId = useAccounts(state => state.currentAccountId)
@@ -46,6 +30,7 @@ export default function AutoOrders() {
   const [exceptions, setExceptions] = useState<Record<string, number>>({})
   const [cellDrafts, setCellDrafts] = useState<Record<string, string>>({})
   const [invalidCells, setInvalidCells] = useState<Record<string, boolean>>({})
+  const [activeCellKey, setActiveCellKey] = useState<string | null>(null)
   const [showDetails, setShowDetails] = useState(false)
   const connected = status?.phase === 'logged-in-unverified'
   const refreshView = useCallback(async () => {
@@ -92,6 +77,7 @@ export default function AutoOrders() {
   useEffect(() => {
     setCellDrafts({})
     setInvalidCells({})
+    setActiveCellKey(null)
     if (!draftKey) { setExceptions({}); return }
     try { setExceptions(JSON.parse(localStorage.getItem(draftKey) || '{}') as Record<string, number>) }
     catch { setExceptions({}) }
@@ -112,6 +98,11 @@ export default function AutoOrders() {
     const next = { ...exceptions, ...allocateExceptionCount(members, count) }
     setExceptions(next)
     if (draftKey) localStorage.setItem(draftKey, JSON.stringify(next))
+  }
+  const toggleCellEditor = (key: string) => {
+    setActiveCellKey(current => current === key ? null : key)
+    setCellDrafts({})
+    setInvalidCells({})
   }
   const alreadyConfirmed = Boolean(placement?.preview?.already_confirmed)
   const hasInvalidCell = Object.values(invalidCells).some(Boolean)
@@ -136,19 +127,7 @@ export default function AutoOrders() {
     setResult(value); await refreshPlacement()
   }
   const sizes = useMemo(() => [...new Set(rows.map(row => row.size).filter(Boolean))].sort(compareSizes), [rows])
-  const groups = useMemo(() => {
-    const values = new Map<string, { row: DueRow; sizes: Record<string, number>; children: number; quantity: number }>()
-    for (const row of rows) {
-      const key = JSON.stringify([row.product_id, row.merchant_code, row.product_name, row.color, row.variant_role])
-      const group = values.get(key) ?? { row, sizes: {}, children: 0, quantity: 0 }
-      group.sizes[row.size] = (group.sizes[row.size] ?? 0) + Number(row.quantity)
-      group.children += 1
-      group.quantity += Number(row.quantity)
-      values.set(key, group)
-    }
-    return [...values.values()].sort((a, b) => (a.row.merchant_code || a.row.product_name)
-      .localeCompare(b.row.merchant_code || b.row.product_name, 'zh-CN'))
-  }, [rows])
+  const groups = useMemo(() => groupMatrixRows(rows), [rows])
   const parents = new Set(rows.map(row => row.shop_order_id)).size
   const quantity = rows.reduce((total, row) => total + Number(row.quantity), 0)
   const observed = view?.observed_at ? new Date(view.observed_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '待核'
@@ -184,7 +163,7 @@ export default function AutoOrders() {
             <p className="text-sm">待发货原始数量始终为 {quantity} 件；本次可确认 {toPlace} 件，本次不下单 {exceptionCount} 件。每次重新整理形成新批次，不自动扣除此前已下单记录。</p>
             {!view.account_bound || !placement?.ok ? <p role="status" className="text-amber-700">{placement?.message || '当前快照未绑定本机账号；请先重新整理订单。'}</p> : null}
             {alreadyConfirmed && <p role="status" className="text-emerald-700">这次整理快照已确认。若今天还有新一轮 ERP 下单，请先点“开始整理”获取新快照。</p>}
-            <p className="text-xs text-muted-foreground">直接在尺码格填写“本次不下单”件数，范围为 0 到该格源订单数量；可确认数量会随之更新。请先在 ERP 完成人工下单，再确认。</p>
+            <p className="text-xs text-muted-foreground">点击对应尺码数量，再填写该格“本次不下单”件数；点击本身不会修改数量。请先在 ERP 完成人工下单，再确认。</p>
             <div className="flex gap-2"><Button variant="outline" onClick={() => setShowDetails(value => !value)}>{showDetails ? '收起子订单' : '查看子订单与部分例外'}</Button>
               <Button disabled={busy || !placement?.ok || !toPlace || alreadyConfirmed || hasInvalidCell} onClick={() => void confirm()}>完成下单</Button></div>
             {showDetails && <div className="max-h-72 overflow-auto space-y-2">{rows.map(row => <div key={row.sku_order_id} className="flex flex-wrap items-center gap-2 border-t pt-2 text-xs">
@@ -196,28 +175,34 @@ export default function AutoOrders() {
               <Button key={batch.id} variant="ghost" size="sm" onClick={() => void undo(batch.id)}>撤销最近一次本机确认</Button>)}
           </div>
           {rows.length === 0 ? <p className="mt-5">本次待发货 0 单。</p> :
-            <div className="mt-5 overflow-x-auto"><table className="w-full border-collapse text-sm">
-              <thead><tr className="bg-slate-50"><th className="p-3 text-left">商家编码或商品名称 · 颜色/款式/原规格</th>{sizes.map(size => <th key={size} className="p-3 text-center">{size}</th>)}<th className="p-3 text-center">源订单数量</th><th className="p-3 text-center">商品子订单</th></tr></thead>
-              <tbody>{groups.map(group => <tr key={JSON.stringify([group.row.product_id, group.row.merchant_code, group.row.product_name, group.row.color, group.row.variant_role])} className="border-t">
+            <div className="mt-5 max-h-[70vh] overflow-auto rounded border"><table className="w-full border-collapse text-sm">
+              <thead><tr><th className="sticky top-0 z-10 bg-slate-50 p-3 text-left shadow-sm">商家编码或商品名称 · 颜色/款式/原规格</th>
+                {sizes.map(size => <th key={size} className="sticky top-0 z-10 bg-slate-50 p-3 text-center shadow-sm">{size}</th>)}
+                <th className="sticky top-0 z-10 bg-slate-50 p-3 text-center shadow-sm">源订单数量</th>
+                <th className="sticky top-0 z-10 bg-slate-50 p-3 text-center shadow-sm">商品子订单</th></tr></thead>
+              <tbody>{groups.map(group => <tr key={group.key} className="border-t">
                 <td className="p-3"><div className="font-medium">{group.row.merchant_code || group.row.product_name} · {group.row.variant_role === 'raw_spec' ? '原规格：' : ''}{group.row.color}</div><div className="text-xs text-muted-foreground">{group.row.merchant_code ? '商家编码' : '商家编码未填写；按商品名称展示'}｜商品 ID：{group.row.product_id}{group.row.variant_review_reason ? `｜${group.row.variant_review_reason}` : ''}</div></td>
                 {sizes.map(size => {
-                  const members = rows.filter(row => row.product_id === group.row.product_id && row.merchant_code === group.row.merchant_code &&
-                    row.product_name === group.row.product_name && row.color === group.row.color && row.variant_role === group.row.variant_role && row.size === size)
+                  const members = rows.filter(row => matrixRowKey(row) === group.key && row.size === size)
                   const count = group.sizes[size] || 0
                   const excepted = members.reduce((sum, row) => sum + (exceptions[row.sku_order_id] ?? 0), 0)
-                  const cellKey = JSON.stringify([group.row.product_id, group.row.merchant_code, group.row.product_name,
-                    group.row.color, group.row.variant_role, size])
-                  return <td key={size} className="p-3 text-center">{count ? <div className="flex min-w-28 flex-col items-center gap-1">
-                    <span>源 {count} 件</span>
-                    <label className="flex items-center gap-1 whitespace-nowrap">例外
-                      <input type="number" inputMode="numeric" min="0" max={count} step="1" aria-label={`${group.row.merchant_code || group.row.product_name} ${group.row.color} ${size} 本次不下单件数`}
-                        aria-invalid={Boolean(invalidCells[cellKey])} className={`w-14 rounded border p-1 text-center ${invalidCells[cellKey] ? 'border-red-500' : ''}`}
-                        disabled={!placement?.ok || alreadyConfirmed} value={cellDrafts[cellKey] ?? excepted}
-                        onChange={event => setCellException(cellKey, members, count, event.target.value)}
-                        onBlur={() => { if (invalidCells[cellKey]) { setCellDrafts(current => { const next = { ...current }; delete next[cellKey]; return next }); setInvalidCells(current => { const next = { ...current }; delete next[cellKey]; return next }) } }} />
-                    </label>
-                    <span className="text-xs text-muted-foreground">可确认 {count - excepted} 件</span>
-                    {invalidCells[cellKey] && <span role="alert" className="text-xs text-red-700">填 0 至 {count} 的整数</span>}
+                  const cellKey = JSON.stringify([group.key, size])
+                  return <td key={size} className="p-3 text-center">{count ? <div className="flex min-w-20 flex-col items-center gap-1">
+                    <button type="button" className="rounded border px-2 py-1" disabled={!placement?.ok || alreadyConfirmed}
+                      aria-expanded={activeCellKey === cellKey} aria-label={`${group.row.merchant_code || group.row.product_name} ${group.row.color} ${size} 源 ${count} 件${excepted ? `，例外 ${excepted} 件` : ''}，点击编辑例外`}
+                      onClick={() => toggleCellEditor(cellKey)}>{count}{excepted ? ` · 例外${excepted}` : ''}</button>
+                    {activeCellKey === cellKey && <div className="flex flex-col items-center gap-1 rounded border bg-white p-2 shadow-sm">
+                      <label className="flex items-center gap-1 whitespace-nowrap">本次不下单
+                        <input type="number" inputMode="numeric" min="0" max={count} step="1" aria-label={`${group.row.merchant_code || group.row.product_name} ${group.row.color} ${size} 本次不下单件数`}
+                          aria-invalid={Boolean(invalidCells[cellKey])} className={`w-14 rounded border p-1 text-center ${invalidCells[cellKey] ? 'border-red-500' : ''}`}
+                          value={cellDrafts[cellKey] ?? excepted}
+                          onChange={event => setCellException(cellKey, members, count, event.target.value)}
+                          onBlur={() => { if (invalidCells[cellKey]) { setCellDrafts(current => { const next = { ...current }; delete next[cellKey]; return next }); setInvalidCells(current => { const next = { ...current }; delete next[cellKey]; return next }) } }} />
+                      </label>
+                      <span className="text-xs text-muted-foreground">可确认 {count - excepted} 件</span>
+                      {invalidCells[cellKey] && <span role="alert" className="text-xs text-red-700">填 0 至 {count} 的整数</span>}
+                      <button type="button" className="text-xs text-blue-700 underline" onClick={() => toggleCellEditor(cellKey)}>收起</button>
+                    </div>}
                   </div> : '—'}</td>
                 })}
                 <td className="p-3 text-center">{group.quantity}</td><td className="p-3 text-center">{group.children}</td>
