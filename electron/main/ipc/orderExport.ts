@@ -353,7 +353,7 @@ export function setupOrderExportIpcHandlers() {
       return { ok: true, message: '候选订单行已只读保存到本机；尚未核实并发布为工作台快照。',
         localPath, parents, lines, pages: capture.partitions.map(part => part.pages.length), issues: capture.issues.slice(0, 20) }
     } catch (error) {
-      await stopObserving()
+      await stopObserving().catch(() => undefined)
       return { ok: false, message: `只读采集停止：${error instanceof Error ? error.message : '未知错误'}；旧快照未改动。` }
     }
   })
@@ -400,7 +400,7 @@ export function setupOrderExportIpcHandlers() {
           ? '近6个月待发货已核对为空：0 个主订单、0 个商品子订单。工作台已显示本次空结果。'
           : `近6个月待发货已整理：${parents} 个主订单、${rows.length} 个商品子订单；源订单数量 ${rows.reduce((sum, row) => sum + row.quantity, 0)}。` }
     } catch (error) {
-      await stopObserving()
+      await stopObserving().catch(() => undefined)
       return { ok: false, message: `订单整理未通过核对：${error instanceof Error ? error.message : '未知错误'}；旧快照未改动。` }
     } finally { organizing.delete(accountId) }
   })
