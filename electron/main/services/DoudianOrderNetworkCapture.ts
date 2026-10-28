@@ -30,26 +30,28 @@ export function sanitizeOrderResponse(value: unknown, depth = 0, inSpecification
 export function observeOrderResponses(page: Page) {
   const evidence: OrderNetworkEvidence[] = []
   const jobs: Promise<void>[] = []
+  let dropped = 0
   const listener = (response: Response) => {
-    if (evidence.length >= 60) return
     let url: URL
     try { url = new URL(response.url()) } catch { return }
     if (url.protocol !== 'https:' || !(url.hostname === 'jinritemai.com' || url.hostname.endsWith('.jinritemai.com'))) return
+    if (url.pathname !== '/api/order/searchlist' && url.pathname !== '/b/a/api/v1/reach/list') return
     if (!response.headers()['content-type']?.includes('json')) return
     jobs.push((async () => {
       try {
         const cleaned = sanitizeOrderResponse(await response.json())
         if (!cleaned) return
         const serialized = JSON.stringify(cleaned)
-        if (serialized.length > 300_000 || evidence.length >= 60) return
+        if (serialized.length > 300_000 || evidence.length >= 2000) { dropped++; return }
         evidence.push({ path: `${url.origin}${url.pathname}`, observedAt: new Date().toISOString(), fields: cleaned })
-      } catch { /* A response can be cancelled during navigation. */ }
+      } catch { /* A response can be cancelled during navigation; page reconciliation checks coverage. */ }
     })())
   }
   page.on('response', listener)
   return async () => {
     page.off('response', listener)
     await Promise.allSettled(jobs)
+    if (dropped) throw new Error(`${dropped} 条订单核验响应未能保留；旧快照未改动`)
     return evidence
   }
 }
