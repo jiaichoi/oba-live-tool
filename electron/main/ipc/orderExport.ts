@@ -7,7 +7,7 @@ import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
 import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
-import { capturePendingOrderPages, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
+import { capturePendingOrderPages, ensureRecentSixMonthPartition, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import { confirmPlacement, placementPreview, readPlacementLedger, undoPlacement,
   validatePlacementSnapshot, writePlacementLedger, type PlacementSnapshot } from '../services/OrderPlacementLedger'
@@ -225,10 +225,10 @@ async function inspectLogin(accountId: string) {
         }
         if (page.url().startsWith(ORDER_LIST_URL) && !session.pendingAttempted) {
           try {
-            const recent = page.getByRole('tab', { name: /近\s*6\s*个月订单/ }).first()
+            const recent = page.getByText(/^近\s*6\s*个月订单$/).first()
             const pending = page.getByRole('tab', { name: /待发货/ }).first()
-            if (await recent.count() > 0 && await pending.count() > 0) {
-              if (await recent.getAttribute('aria-selected') !== 'true') await recent.click({ timeout: 5000 })
+            if (await recent.count() > 0 && await recent.isVisible() && await pending.count() > 0) {
+              await ensureRecentSixMonthPartition(page)
               if (await pending.getAttribute('aria-selected') !== 'true') await pending.click({ timeout: 5000 })
               session.pendingAttempted = true
             }
@@ -371,8 +371,9 @@ export function setupOrderExportIpcHandlers() {
       // A click on an already selected tab can reuse cached rows without a list response.
       // Reload under observation so non-empty rows can be checked against the official response.
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 })
-      await page.getByRole('tab', { name: /近\s*6\s*个月订单/ }).first()
+      await page.getByText(/^近\s*6\s*个月订单$/).first()
         .waitFor({ state: 'visible', timeout: 30000 })
+      await ensureRecentSixMonthPartition(page)
       await page.getByRole('tab', { name: /待发货/ }).first()
         .waitFor({ state: 'visible', timeout: 30000 })
       const capture = await capturePendingOrderPages(page)

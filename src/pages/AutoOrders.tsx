@@ -156,7 +156,7 @@ export default function AutoOrders() {
         : !view?.available ? <p>尚无已核验的待发货结果。</p>
         : <>
           <p className="text-lg font-semibold">{parents} 个主订单、{rows.length} 个商品子订单、源订单数量 {quantity}</p>
-          <p className="mt-2 text-sm text-muted-foreground">读取时间：{observed}（北京时间） · 范围：近6个月待发货 · {view.page_complete ? '本次页面已读全' : '部分已读取'}</p>
+          <p className="mt-2 text-sm text-muted-foreground">上次成功读取时间：{observed}（北京时间） · 范围：近6个月待发货 · {view.page_complete ? '当时页面已读全' : '当时仅部分读取'}</p>
           <p className="mt-1 text-sm text-muted-foreground">页面当时显示主订单 {view.displayed_parent_count ?? '待核'} 个；店铺 ID：{view.shop_id_verified ?? '待核'}。这是读取时点快照，不代表实时同步。</p>
           <div className="mt-4 rounded-lg border p-4 space-y-2">
             <p className="font-semibold">ERP 人工下单进度</p>
