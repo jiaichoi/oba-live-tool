@@ -1,7 +1,4 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, chmod, writeFile, copyFile, rename, stat, readFile } from 'node:fs/promises'
-import path from 'node:path'
-import { app, ipcMain } from 'electron'
+import { ipcMain } from 'electron'
 import type { Browser, BrowserContext, Page } from 'playwright'
 import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
@@ -9,9 +6,7 @@ import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
 import { capturePendingOrderPages, ensureRecentSixMonthPartition, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
-import { confirmPlacement, placementPreview, readPlacementLedger, undoPlacement,
-  validatePlacementSnapshot, writePlacementLedger, type PlacementSnapshot } from '../services/OrderPlacementLedger'
-import { readPlacedOrderMetadata } from '../services/PlacedOrderMetadata'
+import { beijingDay, promisedShipDay } from '../services/DoudianDueDay'
 import windowManager from '../windowManager'
 
 const ORDER_LIST_URL = 'https://fxg.jinritemai.com/ffa/morder/order/list'
@@ -25,12 +20,11 @@ const opening = new Set<string>()
 const statuses = new Map<string, Status>()
 const listeningPages = new WeakSet<Page>()
 const organizing = new Set<string>()
-const placing = new Set<string>()
 
 type OrganizedRow = { shop_order_id: string; sku_order_id: string; product_id: string;
   product_name: string; merchant_code: string; color: string; size: string;
   variant_role: 'color' | 'raw_spec'; variant_review_reason: string;
-  quantity: number; source_spec: string; status: string }
+  quantity: number; source_spec: string; status: string; promised_ship_day: string }
 
 function shopIdFromEvidence(evidence: OrderNetworkEvidence[]): string | null {
   const ids = new Set<string>()
@@ -58,7 +52,8 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
   }
   const products = new Map<string, { product_id: string; product_name: string; merchant_sku_code: string;
     official_item: Record<string, unknown>;
-    variant: { color: string; size: string; role: 'color' | 'raw_spec' } | null }>()
+    variant: { color: string; size: string; role: 'color' | 'raw_spec' } | null;
+    promisedShipDay: string }>()
   for (const response of evidence) {
     if (!response.path.endsWith('/api/order/searchlist')) continue
     const data = (response.fields as { data?: unknown }).data
@@ -67,16 +62,21 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
       (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text !== '待发货')) continue
     for (const parent of data as Array<Record<string, unknown>>) {
       const parentId = String(parent.shop_order_id ?? '')
+      const dueDay = promisedShipDay(parent.exp_ship_time)
       for (const item of (parent.product_item as Array<Record<string, unknown>> | undefined) ?? []) {
         const childId = String(item.item_order_id ?? '')
         const childStatus = (item.sku_order_status_info as { order_status_text?: string } | undefined)?.order_status_text
         if (!/^\d{19}$/.test(parentId) || !/^\d{19}$/.test(childId) || childStatus !== '待发货')
           throw new Error('官方列表商品子订单编号或状态未核实')
         const key = `${parentId}:${childId}`
-        if (products.has(key)) continue
+        if (products.has(key)) {
+          if (products.get(key)?.promisedShipDay !== dueDay)
+            throw new Error('同一商品子订单的承诺发货日期不一致；未生成当天订单')
+          continue
+        }
         products.set(key, { official_item: item, product_id: String(item.product_id ?? ''),
           product_name: String(item.product_name ?? ''), merchant_sku_code: String(item.merchant_sku_code ?? ''),
-          variant: parseStructuredVariant(item) })
+          variant: parseStructuredVariant(item), promisedShipDay: dueDay })
       }
     }
   }
@@ -92,8 +92,10 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
     const item = products.get(key)
     // The shop sometimes renders an ancillary consumer remark as a duplicate row.
     if (!item) continue
+    if (line.promisedShipAt && line.promisedShipAt.slice(0, 10) !== item.promisedShipDay)
+      throw new Error('页面与官方承诺发货日期不一致；未生成当天订单')
     if (item.variant && !officialVariantMatchesVisibleLine(item.official_item, line, item.variant))
-      throw new Error('官方商品规格与页面商品行不一致；旧快照未改动')
+      throw new Error('官方商品规格与页面商品行不一致；未更新当天结果')
     const variant = item.variant ?? (line.color && line.size ? { color: line.color, size: line.size,
       role: line.variantRole ?? 'raw_spec' } : null)
     if (!variant) { missingSpecification++; continue }
@@ -107,7 +109,8 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
       merchant_code: item.merchant_sku_code, color: variant.color, size: variant.size,
       variant_role: variant.role,
       variant_review_reason: variant.role === 'color' ? '' : '平台未标注颜色或款式类型；按原始规格展示',
-      quantity: line.quantity!, source_spec: line.productName, status: '待发货' })
+      quantity: line.quantity!, source_spec: line.productName, status: '待发货',
+      promised_ship_day: item.promisedShipDay })
   }
   if (rows.length !== products.size || new Set(rows.map(row => row.shop_order_id)).size !== partition.displayedPendingCount ||
       partition.pages.reduce((sum, page) => sum + page.parentCount, 0) !== partition.displayedPendingCount)
@@ -115,69 +118,29 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
   return rows
 }
 
-async function publishOrganized(accountId: string, capture: PendingOrderCapture, rows: OrganizedRow[]) {
-  const data = path.join(app.getPath('userData'), 'workbench-data')
-  await mkdir(data, { recursive: true, mode: 0o700 })
-  const target = path.join(data, 'partial_due.json')
-  const temporary = path.join(data, `partial_due.${randomUUID()}.json`)
-  const partition = capture.partitions[0]
-  const output = { source: 'OBA订单列表当次逐页读取', observed_at: capture.finishedAt,
-    scope: 'recent_6_months_pending', displayed_parent_count: partition.displayedPendingCount,
-    official_parent_count: partition.displayedPendingCount, official_item_count: rows.length,
-    page_complete: true, empty_state_confirmed: rows.length === 0 ? partition.emptyStateConfirmed : false,
-    shop_id_verified: capture.visibleShopId, account_id: accountId, rows }
-  await writeFile(temporary, JSON.stringify(output, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-  if (await stat(target).then(() => true).catch(() => false))
-    await copyFile(target, path.join(data, `partial_due.before_${Date.now()}.json`))
-  await rename(temporary, target)
+type TodayView = { available: true; scope: 'today_due'; observed_at: string; day: string;
+  page_complete: true; displayed_parent_count: number; source_pending_count: number;
+  shop_id_verified: string; account_bound: true; rows: OrganizedRow[] }
+const todayViews = new Map<string, TodayView>()
+
+function publishOrganized(accountId: string, capture: PendingOrderCapture, rows: OrganizedRow[]): TodayView {
+  const day = beijingDay(new Date(capture.finishedAt))
+  const todayRows = rows.filter(row => row.promised_ship_day === day)
+  const output: TodayView = { available: true, scope: 'today_due', observed_at: capture.finishedAt,
+    day, page_complete: true, displayed_parent_count: new Set(todayRows.map(row => row.shop_order_id)).size,
+    source_pending_count: capture.partitions[0].displayedPendingCount!,
+    shop_id_verified: capture.visibleShopId!, account_bound: true, rows: todayRows }
+  todayViews.set(accountId, output)
+  return output
 }
 
-async function pendingView(accountId: string) {
-  const source = path.join(app.getPath('userData'), 'workbench-data', 'partial_due.json')
-  try {
-    const candidate = JSON.parse(await readFile(source, 'utf8')) as Record<string, unknown>
-    const rows = candidate.rows
-    if (candidate.account_id !== accountId || candidate.scope !== 'recent_6_months_pending' || candidate.page_complete !== true ||
-        !Array.isArray(rows) || !/^\d+$/.test(String(candidate.shop_id_verified ?? '')) ||
-        !Number.isInteger(Number(candidate.displayed_parent_count))) return { available: false }
-    const unique = new Set<string>()
-    for (const row of rows) {
-      if (!row || typeof row !== 'object') return { available: false }
-      const entry = row as Record<string, unknown>
-      const id = String(entry.sku_order_id ?? '')
-      if (!/^\d{19}$/.test(id) || unique.has(id) || !entry.product_name || !entry.color || !entry.size ||
-          !Number.isInteger(Number(entry.quantity)) || Number(entry.quantity) < 1) return { available: false }
-      unique.add(id)
-    }
-    if (rows.length === 0 && candidate.empty_state_confirmed !== true) return { available: false }
-    return { available: true, scope: candidate.scope, observed_at: candidate.observed_at,
-      page_complete: true, displayed_parent_count: candidate.displayed_parent_count,
-      shop_id_verified: candidate.shop_id_verified,
-      account_bound: true, rows }
-  } catch { return { available: false } }
-}
-
-async function placementSnapshot(accountId: string): Promise<PlacementSnapshot> {
-  const view = await pendingView(accountId) as { available: boolean; account_bound?: boolean;
-    shop_id_verified?: unknown; observed_at?: unknown; rows?: unknown }
-  if (!view.available || !view.account_bound) throw new Error('请先在当前账号重新整理订单，核验店铺归属')
-  const snapshot = { account_id: accountId, shop_id_verified: String(view.shop_id_verified),
-    observed_at: String(view.observed_at), page_complete: true as const,
-    rows: (view.rows as OrganizedRow[]).map(row => ({ shop_order_id: row.shop_order_id,
-      sku_order_id: row.sku_order_id, quantity: row.quantity })) }
-  validatePlacementSnapshot(snapshot, accountId)
-  return snapshot
-}
-
-const placementRoot = () => path.join(app.getPath('userData'), 'workbench-data')
-
-async function saveReviewCandidate(accountId: string, capture: PendingOrderCapture, networkEvidence: OrderNetworkEvidence[]) {
-  const inbox = path.join(app.getPath('userData'), 'OrderReports', accountId)
-  await mkdir(inbox, { recursive: true, mode: 0o700 })
-  const localPath = path.join(inbox, `${randomUUID()}_pending-page-candidate.json`)
-  await writeFile(localPath, JSON.stringify({ ...capture, networkEvidence }), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-  await chmod(localPath, 0o600)
-  return localPath
+function pendingView(accountId: string): TodayView | { available: false } {
+  const view = todayViews.get(accountId)
+  if (!view || view.day !== beijingDay(new Date())) {
+    todayViews.delete(accountId)
+    return { available: false }
+  }
+  return view
 }
 
 function publish(accountId: string, phase: Phase, message: string) {
@@ -260,33 +223,17 @@ function attachPage(accountId: string, page: Page) {
       void closeSession(accountId)
   })
   page.on('download', async download => {
-    const filename = download.suggestedFilename().replace(/[\\/]/g, '_')
-    const result = { accountId, ok: false, filename, savedAt: '', localPath: '', message: '' }
-    try {
-      const origin = new URL(page.url()).origin
-      if (origin !== 'https://fxg.jinritemai.com' || !/\.(zip|csv)$/i.test(filename)) {
-        result.message = '下载来源或格式不是已识别的抖店订单报表，未保存到订单收件箱。'
-      } else {
-        const inbox = path.join(app.getPath('userData'), 'OrderReports', accountId)
-        await mkdir(inbox, { recursive: true, mode: 0o700 })
-        const target = path.join(inbox, `${randomUUID()}_${filename}`)
-        await download.saveAs(target)
-        await chmod(target, 0o600)
-        result.ok = true
-        result.localPath = target
-        result.savedAt = new Date().toISOString()
-        result.message = '报表候选文件已下载；尚未核对店铺、筛选范围或导入订单。'
-      }
-    } catch {
-      result.message = '报表下载未完成；请在官方页面检查下载状态。'
-    }
-    windowManager.send(IPC_CHANNELS.orderExport.downloaded, result)
+    await download.cancel().catch(() => undefined)
+    windowManager.send(IPC_CHANNELS.orderExport.downloaded, { accountId, ok: false,
+      filename: download.suggestedFilename(), savedAt: '', localPath: '',
+      message: '仅展示当天应发订单；工作台不保存订单报表下载。' })
   })
 }
 
 async function closeSession(accountId: string) {
   const session = sessions.get(accountId)
   sessions.delete(accountId)
+  todayViews.delete(accountId)
   if (session?.timer) clearInterval(session.timer)
   if (session) await session.browser.close().catch(() => undefined)
   orderSyncCoordinator.cancel(accountId, 'shop')
@@ -295,41 +242,12 @@ async function closeSession(accountId: string) {
 
 export function setupOrderExportIpcHandlers() {
   ipcMain.handle(IPC_CHANNELS.orderExport.getPendingView, (_event, accountId: string) => pendingView(accountId))
-  ipcMain.handle(IPC_CHANNELS.orderExport.getPlacement, async (_event, accountId: string) => {
-    try {
-      const snapshot = await placementSnapshot(accountId)
-      const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
-      const order_metadata = await readPlacedOrderMetadata(placementRoot(), accountId, snapshot.shop_id_verified, ledger.batches)
-      return { ok: true, ledger, order_metadata,
-        preview: placementPreview(snapshot, ledger, {}), observed_at: snapshot.observed_at }
-    } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '下单记录不可读取' } }
-  })
-  ipcMain.handle(IPC_CHANNELS.orderExport.confirmPlacement, async (_event, accountId: string,
-    expectedObservedAt: string, exceptions: Record<string, number>) => {
-    if (placing.has(accountId)) return { ok: false, message: '已有一次下单确认正在进行' }
-    placing.add(accountId)
-    try {
-      const snapshot = await placementSnapshot(accountId)
-      const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
-      const result = confirmPlacement(snapshot, ledger, exceptions, expectedObservedAt)
-      await writePlacementLedger(placementRoot(), result.ledger)
-      return { ok: true, batch_id: result.batch.id,
-        count: result.batch.entries.reduce((sum, row) => sum + row.placed_quantity, 0),
-        message: '本次非例外订单已记为 ERP 人工已下单；未调用 ERP 或抖店发货接口。' }
-    } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '下单确认失败' } }
-    finally { placing.delete(accountId) }
-  })
-  ipcMain.handle(IPC_CHANNELS.orderExport.undoPlacement, async (_event, accountId: string, batchId: string) => {
-    if (placing.has(accountId)) return { ok: false, message: '已有一次下单记录操作正在进行' }
-    placing.add(accountId)
-    try {
-      const snapshot = await placementSnapshot(accountId)
-      const ledger = await readPlacementLedger(placementRoot(), accountId, snapshot.shop_id_verified)
-      await writePlacementLedger(placementRoot(), undoPlacement(ledger, batchId))
-      return { ok: true, message: '已撤销这批本地下单标记；请另行核对真实 ERP 订单。' }
-    } catch (error) { return { ok: false, message: error instanceof Error ? error.message : '撤销失败' } }
-    finally { placing.delete(accountId) }
-  })
+  ipcMain.handle(IPC_CHANNELS.orderExport.getPlacement, () =>
+    ({ ok: false, message: '当天应发模式不保存本机下单确认记录。' }))
+  ipcMain.handle(IPC_CHANNELS.orderExport.confirmPlacement, () =>
+    ({ ok: false, message: '当天应发模式已停用本机下单确认。' }))
+  ipcMain.handle(IPC_CHANNELS.orderExport.undoPlacement, () =>
+    ({ ok: false, message: '当天应发模式没有可撤销的本机下单记录。' }))
   ipcMain.handle(IPC_CHANNELS.orderExport.getStatus, (_event, accountId: string) => statusOf(accountId))
   ipcMain.handle(IPC_CHANNELS.orderExport.check, (_event, accountId: string) => inspectLogin(accountId))
   ipcMain.handle(IPC_CHANNELS.orderExport.probeOrderPage, async (_event, accountId: string) => {
@@ -346,24 +264,23 @@ export function setupOrderExportIpcHandlers() {
     const stopObserving = observeOrderResponses(page)
     try {
       const capture = await capturePendingOrderPages(page)
-      const networkEvidence = await stopObserving()
-      const localPath = await saveReviewCandidate(accountId, capture, networkEvidence)
+      await stopObserving()
       const parents = capture.partitions.reduce((n, part) => n + part.pages.reduce((m, current) => m + current.parentCount, 0), 0)
       const lines = capture.partitions.reduce((n, part) => n + part.pages.reduce((m, current) => m + current.lines.length, 0), 0)
-      return { ok: true, message: '候选订单行已只读保存到本机；尚未核实并发布为工作台快照。',
-        localPath, parents, lines, pages: capture.partitions.map(part => part.pages.length), issues: capture.issues.slice(0, 20) }
+      return { ok: true, message: '候选订单行已只读检查，未保存订单内容。',
+        parents, lines, pages: capture.partitions.map(part => part.pages.length), issues: capture.issues.slice(0, 20) }
     } catch (error) {
       await stopObserving().catch(() => undefined)
-      return { ok: false, message: `只读采集停止：${error instanceof Error ? error.message : '未知错误'}；旧快照未改动。` }
+      return { ok: false, message: `只读采集停止：${error instanceof Error ? error.message : '未知错误'}；未保存订单。` }
     }
   })
   ipcMain.handle(IPC_CHANNELS.orderExport.organizePending, async (_event, accountId: string) => {
     const session = sessions.get(accountId)
     if (!session || statusOf(accountId).phase !== 'logged-in-unverified')
-      return { ok: false, message: '店铺后台未登录；旧快照未改动。' }
+      return { ok: false, message: '店铺后台未登录；未更新当天结果。' }
     const page = session.context.pages().find(candidate => !candidate.isClosed() &&
       candidate.url().startsWith(ORDER_LIST_URL))
-    if (!page) return { ok: false, message: '未找到官方订单列表页；旧快照未改动。' }
+    if (!page) return { ok: false, message: '未找到官方订单列表页；未更新当天结果。' }
     if (organizing.has(accountId)) return { ok: false, message: '已有一次订单整理正在进行。' }
     organizing.add(accountId)
     const stopObserving = observeOrderResponses(page)
@@ -380,29 +297,22 @@ export function setupOrderExportIpcHandlers() {
       const check = await capturePendingOrderPages(page)
       const evidence = await stopObserving()
       if (pendingCaptureFingerprint(capture) !== pendingCaptureFingerprint(check))
-        throw new Error('两次逐页读取的订单身份、状态或数量不一致；旧快照未改动')
+        throw new Error('两次逐页读取的订单身份、状态或数量不一致；未更新当天结果')
       const observedShopId = shopIdFromEvidence(evidence)
       if (capture.visibleShopId && observedShopId && capture.visibleShopId !== observedShopId)
-        throw new Error('页面与官方会话中的店铺 ID 不一致；旧快照未改动')
+        throw new Error('页面与官方会话中的店铺 ID 不一致；未更新当天结果')
       capture.visibleShopId = capture.visibleShopId ?? observedShopId
       capture.complete = Boolean(capture.visibleShopId)
       let rows: OrganizedRow[]
-      try { rows = organizedRows(capture, evidence) }
-      catch (error) {
-        const localPath = await saveReviewCandidate(accountId, capture, evidence)
-        throw new Error(`${error instanceof Error ? error.message : '未知错误'}；原始商品规格与待核原因已保存在本机 ${localPath}`)
-      }
-      await publishOrganized(accountId, capture, rows)
-      const parents = new Set(rows.map(row => row.shop_order_id)).size
-      return { ok: true, parents, children: rows.length,
-        quantity: rows.reduce((sum, row) => sum + row.quantity, 0),
-        empty: rows.length === 0, observedAt: capture.finishedAt,
-        message: rows.length === 0
-          ? '近6个月待发货已核对为空：0 个主订单、0 个商品子订单。工作台已显示本次空结果。'
-          : `近6个月待发货已整理：${parents} 个主订单、${rows.length} 个商品子订单；源订单数量 ${rows.reduce((sum, row) => sum + row.quantity, 0)}。` }
+      rows = organizedRows(capture, evidence)
+      const view = publishOrganized(accountId, capture, rows)
+      return { ok: true, parents: view.displayed_parent_count, children: view.rows.length,
+        quantity: view.rows.reduce((sum, row) => sum + row.quantity, 0),
+        empty: view.rows.length === 0, observedAt: capture.finishedAt,
+        message: `今日应发订单：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；${view.rows.reduce((sum, row) => sum + row.quantity, 0)} 件。来源已核对 ${view.source_pending_count} 个待发货主订单，本机不保存订单内容。` }
     } catch (error) {
       await stopObserving().catch(() => undefined)
-      return { ok: false, message: `订单整理未通过核对：${error instanceof Error ? error.message : '未知错误'}；旧快照未改动。` }
+      return { ok: false, message: `订单整理未通过核对：${error instanceof Error ? error.message : '未知错误'}；未保存订单。` }
     } finally { organizing.delete(accountId) }
   })
   ipcMain.handle(IPC_CHANNELS.orderExport.open, async (_event, accountId: string, chromePath?: string) => {
@@ -435,6 +345,7 @@ export function setupOrderExportIpcHandlers() {
       created.browser.on('disconnected', () => {
         if (sessions.get(accountId) !== session) return
         sessions.delete(accountId)
+        todayViews.delete(accountId)
         if (session.timer) clearInterval(session.timer)
         orderSyncCoordinator.cancel(accountId, 'shop')
         publish(accountId, 'disconnected', '店铺后台浏览器已关闭。')

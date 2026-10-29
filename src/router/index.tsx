@@ -7,7 +7,6 @@ import AutoReplySettings from '@/pages/AutoReply/AutoReplySettings'
 import LiveControl from '@/pages/LiveControl'
 import Workbench from '@/pages/Workbench'
 import AutoOrders from '@/pages/AutoOrders'
-import PlacedOrders from '@/pages/PlacedOrders'
 import ShopConnect from '@/pages/ShopConnect'
 import RedPacket from '@/pages/RedPacket'
 import Settings from '@/pages/SettingsPage'
@@ -32,11 +31,11 @@ export const router = createHashRouter([
       },
       {
         path: '/orders/shipped',
-        element: <PlacedOrders />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/orders/all',
-        element: <Workbench path="/" />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/sales/history',
@@ -48,19 +47,19 @@ export const router = createHashRouter([
       },
       {
         path: '/data/history',
-        element: <Workbench path="/history" />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/data/history-sku',
-        element: <Workbench path="/history-sku" />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/data/imports',
-        element: <Workbench path="/imports" />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/data/import',
-        element: <Workbench path="/import" />,
+        element: <Navigate to="/orders/due" replace />,
       },
       {
         path: '/live-control',
