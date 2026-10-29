@@ -31,11 +31,12 @@ export function summarizeOrderPage(urlText: string, visibleText: string): OrderP
   const countMatches = [...visibleText.matchAll(/待发货\s*\(?\s*(\d+)\s*\)?/g)]
   const counts = [...new Set(countMatches.map(match => Number(match[1])))]
   const visiblePendingMainOrderCount = counts.length === 1 ? counts[0] : null
-  const ok = isOrderPage && hasRecentPartition && hasOlderPartition && hasPendingFilter
+  // The older partition may be inside a closed dropdown in the new shop layout.
+  const ok = isOrderPage && hasRecentPartition && hasPendingFilter
   return { ok, observedAt, sourceUrl: isOrderPage ? `${url.origin}${url.pathname}` : null,
     hasRecentPartition, hasOlderPartition, hasPendingFilter, visiblePendingMainOrderCount,
     message: ok
-      ? '已识别订单页面与两个时间分区；仍缺店铺 ID、订单响应结构、完整分页及商品子订单，未同步。'
+      ? '已见订单页面与近6个月文字；仍缺当前选中状态、店铺 ID、订单响应结构、完整分页及商品子订单，未同步。'
       : '订单页面或时间分区未核实，未同步。' }
 }
 

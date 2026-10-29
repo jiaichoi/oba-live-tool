@@ -22,6 +22,14 @@ describe('Doudian order page metadata probe', () => {
     }
   })
 
+  it('recognizes a selected recent range when the older choice is hidden in a dropdown', () => {
+    const result = summarizeOrderPage('https://fxg.jinritemai.com/ffa/morder/order/list',
+      '近6个月订单 待发货 95')
+    assert.equal(result.ok, true)
+    assert.equal(result.hasOlderPartition, false)
+    assert.match(result.message, /仍缺当前选中状态/)
+  })
+
   it('does not infer a count when the page has conflicting status counters', () => {
     const result = summarizeOrderPage(
       'https://fxg.jinritemai.com/ffa/morder/order/list',

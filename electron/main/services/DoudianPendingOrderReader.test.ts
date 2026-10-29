@@ -3,6 +3,19 @@ import { describe, it } from 'node:test'
 import { officialVariantMatchesVisibleLine, parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
 
 describe('visible Doudian parent and merchandise rows', () => {
+  it('parses the aurora table parent and item rows', () => {
+    const result = parseVisibleRows([
+      { className: 'aurora-table-measure-row', cells: ['', '商品信息'] },
+      { className: 'aurora-table-row aurora-table-row-level-0', cells: ['', '订单编号 1234567890123456789 下单时间 2026-10-29 09:20:00'] },
+      { className: 'aurora-table-row aurora-table-row-level-1', cells: ['',
+        '羊毛裤【女款】黑色/L x1 商家编码:54628BNYB 商品单ID:2234567890123456789',
+        '¥139.00 x1', '-', '待发货 承诺发货时间 2026-10-30 18:00:00'] },
+    ])
+    assert.equal(result.parentCount, 1)
+    assert.equal(result.lines.length, 1)
+    assert.equal(result.lines[0].skuOrderId, '2234567890123456789')
+    assert.equal(result.lines[0].quantity, 1)
+  })
   it('ignores a live shipping countdown but detects quantity and status changes', () => {
     const capture: PendingOrderCapture = { sourceUrl: '', visibleShopId: null, startedAt: '', finishedAt: '',
       complete: false, issues: [], partitions: [{ key: 'recent_6_months', displayedPendingCount: 1,
