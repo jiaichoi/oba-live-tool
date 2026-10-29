@@ -273,7 +273,8 @@ async function createWindow() {
 
 app
   .whenReady()
-  .then(startWorkbenchService)
+  // Today-due mode keeps order rows in the Electron process only. The legacy
+  // local order service can import and persist orders, so do not start it.
   .then(logStartupInfo)
   .then(() => providerService.initialize())
   .then(createWindow)

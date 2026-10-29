@@ -45,7 +45,7 @@ class OrderSyncCoordinator {
     this.activeSources.delete(accountId)
     this.setStatus(accountId, {
       phase: 'idle',
-      message: '店铺连接已断开；保留上次已发布的本机快照。',
+      message: '店铺连接已断开；本次会话的当天订单已清空。',
       shopId: null,
     })
   }
@@ -59,7 +59,7 @@ class OrderSyncCoordinator {
     this.verifiedShops.set(accountId, { generation, shopId })
     this.setStatus(accountId, {
       phase: 'verifying',
-      message: `店铺 ${shopId} 已核验；正在核对订单报表完整性，旧快照仍保留。`,
+      message: `店铺 ${shopId} 已核验；正在核对订单页面完整性，订单仅在内存中展示。`,
       shopId,
     })
     return true
@@ -69,7 +69,7 @@ class OrderSyncCoordinator {
     if (!this.isCurrent(accountId, generation)) return
     const shopId = this.verifiedShops.get(accountId)?.shopId ?? null
     this.setStatus(accountId, {
-      phase: 'failed', message: `${message}；原已发布快照保留。`, shopId,
+      phase: 'failed', message: `${message}；未保存订单。`, shopId,
     })
   }
 
@@ -80,7 +80,7 @@ class OrderSyncCoordinator {
     }
     const status: OrderSyncStatus = {
       accountId, phase: 'current', shopId,
-      message: `店铺 ${shopId} 完整待发货快照已发布：${publishedAt}。`,
+      message: `店铺 ${shopId} 当天应发订单已读取：${publishedAt}；本机不保存订单内容。`,
       lastSuccessAt: publishedAt, updatedAt: new Date().toISOString(),
     }
     this.statuses.set(accountId, status)

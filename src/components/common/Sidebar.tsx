@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router'
-import { ChartColumn, ChevronDown, ClipboardList, Database, History, List, PackageCheck, RadioTower, Upload } from 'lucide-react'
+import { ChartColumn, ChevronDown, ClipboardList, Database, PackageCheck, RadioTower } from 'lucide-react'
 import { abilities, autoReplyPlatforms } from '@/abilities'
 import { useCurrentAutoMessage } from '@/hooks/useAutoMessage'
 import { useCurrentAutoPopUp } from '@/hooks/useAutoPopUp'
@@ -40,29 +40,13 @@ export default function Sidebar() {
     },
     {
       id: '/orders/due',
-      name: '自动整理订单',
+      name: '今日应发订单',
       icon: <ClipboardList className="w-5 h-5" />,
-    },
-    {
-      id: '/orders/shipped',
-      name: '当日已下单',
-      icon: <PackageCheck className="w-5 h-5" />,
-    },
-    {
-      id: '/orders/all',
-      name: '全部订单',
-      icon: <List className="w-5 h-5" />,
     },
   ]
   const salesTabs: SidebarTab[] = [
     { id: '/sales/history', name: '销量历史', icon: <ChartColumn className="w-5 h-5" /> },
     { id: '/sales/stock', name: '平台库存快照', icon: <Database className="w-5 h-5" /> },
-  ]
-  const dataTabs: SidebarTab[] = [
-    { id: '/data/history', name: '历史订单', icon: <History className="w-5 h-5" /> },
-    { id: '/data/history-sku', name: '历史 SKU 子订单', icon: <List className="w-5 h-5" /> },
-    { id: '/data/imports', name: '导入记录', icon: <ClipboardList className="w-5 h-5" /> },
-    { id: '/data/import', name: '导入报表', icon: <Upload className="w-5 h-5" /> },
   ]
   const liveTabs: SidebarTab[] = [
     {
@@ -120,18 +104,15 @@ export default function Sidebar() {
   )
   const isOrderRoute = location.pathname.startsWith('/orders/')
   const isSalesRoute = location.pathname.startsWith('/sales/')
-  const isDataRoute = location.pathname.startsWith('/data/')
   const [orderOpen, setOrderOpen] = useState(isOrderRoute)
   const [salesOpen, setSalesOpen] = useState(isSalesRoute)
-  const [dataOpen, setDataOpen] = useState(isDataRoute)
   const [liveOpen, setLiveOpen] = useState(isLiveRoute)
 
   useEffect(() => {
     if (isOrderRoute) setOrderOpen(true)
     if (isSalesRoute) setSalesOpen(true)
-    if (isDataRoute) setDataOpen(true)
     if (isLiveRoute) setLiveOpen(true)
-  }, [isOrderRoute, isSalesRoute, isDataRoute, isLiveRoute, location.pathname])
+  }, [isOrderRoute, isSalesRoute, isLiveRoute, location.pathname])
 
   const renderTab = (tab: SidebarTab, nested = false) => (
     <NavLink
@@ -185,7 +166,6 @@ export default function Sidebar() {
         <nav className="space-y-2">
           {renderGroup('order-fulfillment-links', '订单履约', <ClipboardList className="w-5 h-5" />, orderTabs, orderOpen, setOrderOpen, isOrderRoute)}
           {renderGroup('sales-links', '销量分析', <ChartColumn className="w-5 h-5" />, salesTabs, salesOpen, setSalesOpen, isSalesRoute)}
-          {renderGroup('data-links', '数据管理', <Database className="w-5 h-5" />, dataTabs, dataOpen, setDataOpen, isDataRoute)}
           {renderGroup('live-tools-links', '直播工具', <RadioTower className="w-5 h-5" />, visibleLiveTabs, liveOpen, setLiveOpen, isLiveRoute)}
           {utilityTabs.map(tab => renderTab(tab))}
         </nav>
