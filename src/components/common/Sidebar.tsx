@@ -39,6 +39,11 @@ export default function Sidebar() {
       icon: <PackageCheck className="w-5 h-5" />,
     },
     {
+      id: '/orders/all',
+      name: '全部待发货订单',
+      icon: <ClipboardList className="w-5 h-5" />,
+    },
+    {
       id: '/orders/due',
       name: '今日应发订单',
       icon: <ClipboardList className="w-5 h-5" />,

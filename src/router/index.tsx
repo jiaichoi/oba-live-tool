@@ -19,7 +19,7 @@ export const router = createHashRouter([
     children: [
       {
         path: '/',
-        element: <Navigate to="/orders/due" replace />,
+        element: <Navigate to="/orders/all" replace />,
       },
       {
         path: '/orders/due',
@@ -35,7 +35,7 @@ export const router = createHashRouter([
       },
       {
         path: '/orders/all',
-        element: <Navigate to="/orders/due" replace />,
+        element: <AutoOrders mode="all" />,
       },
       {
         path: '/sales/history',

@@ -118,26 +118,25 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
   return rows
 }
 
-type TodayView = { available: true; scope: 'today_due'; observed_at: string; day: string;
+type PendingView = { available: true; scope: 'pending_and_today_due'; observed_at: string; day: string;
   page_complete: true; displayed_parent_count: number; source_pending_count: number;
   shop_id_verified: string; account_bound: true; rows: OrganizedRow[] }
-const todayViews = new Map<string, TodayView>()
+const pendingViews = new Map<string, PendingView>()
 
-function publishOrganized(accountId: string, capture: PendingOrderCapture, rows: OrganizedRow[]): TodayView {
+function publishOrganized(accountId: string, capture: PendingOrderCapture, rows: OrganizedRow[]): PendingView {
   const day = beijingDay(new Date(capture.finishedAt))
-  const todayRows = rows.filter(row => row.promised_ship_day === day)
-  const output: TodayView = { available: true, scope: 'today_due', observed_at: capture.finishedAt,
-    day, page_complete: true, displayed_parent_count: new Set(todayRows.map(row => row.shop_order_id)).size,
+  const output: PendingView = { available: true, scope: 'pending_and_today_due', observed_at: capture.finishedAt,
+    day, page_complete: true, displayed_parent_count: new Set(rows.map(row => row.shop_order_id)).size,
     source_pending_count: capture.partitions[0].displayedPendingCount!,
-    shop_id_verified: capture.visibleShopId!, account_bound: true, rows: todayRows }
-  todayViews.set(accountId, output)
+    shop_id_verified: capture.visibleShopId!, account_bound: true, rows }
+  pendingViews.set(accountId, output)
   return output
 }
 
-function pendingView(accountId: string): TodayView | { available: false } {
-  const view = todayViews.get(accountId)
+function pendingView(accountId: string): PendingView | { available: false } {
+  const view = pendingViews.get(accountId)
   if (!view || view.day !== beijingDay(new Date())) {
-    todayViews.delete(accountId)
+    pendingViews.delete(accountId)
     return { available: false }
   }
   return view
@@ -226,14 +225,14 @@ function attachPage(accountId: string, page: Page) {
     await download.cancel().catch(() => undefined)
     windowManager.send(IPC_CHANNELS.orderExport.downloaded, { accountId, ok: false,
       filename: download.suggestedFilename(), savedAt: '', localPath: '',
-      message: '仅展示当天应发订单；工作台不保存订单报表下载。' })
+      message: '工作台仅在本次运行期间展示待发货订单；不保存订单报表下载。' })
   })
 }
 
 async function closeSession(accountId: string) {
   const session = sessions.get(accountId)
   sessions.delete(accountId)
-  todayViews.delete(accountId)
+  pendingViews.delete(accountId)
   if (session?.timer) clearInterval(session.timer)
   if (session) await session.browser.close().catch(() => undefined)
   orderSyncCoordinator.cancel(accountId, 'shop')
@@ -306,10 +305,11 @@ export function setupOrderExportIpcHandlers() {
       let rows: OrganizedRow[]
       rows = organizedRows(capture, evidence)
       const view = publishOrganized(accountId, capture, rows)
+      const todayRows = view.rows.filter(row => row.promised_ship_day === view.day)
       return { ok: true, parents: view.displayed_parent_count, children: view.rows.length,
         quantity: view.rows.reduce((sum, row) => sum + row.quantity, 0),
         empty: view.rows.length === 0, observedAt: capture.finishedAt,
-        message: `今日应发订单：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；${view.rows.reduce((sum, row) => sum + row.quantity, 0)} 件。来源已核对 ${view.source_pending_count} 个待发货主订单，本机不保存订单内容。` }
+        message: `全部待发货：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；今日应发 ${new Set(todayRows.map(row => row.shop_order_id)).size} 个主订单。来源已核对 ${view.source_pending_count} 个待发货主订单，本机不保存订单内容。` }
     } catch (error) {
       await stopObserving().catch(() => undefined)
       return { ok: false, message: `订单整理未通过核对：${error instanceof Error ? error.message : '未知错误'}；未保存订单。` }
@@ -345,7 +345,7 @@ export function setupOrderExportIpcHandlers() {
       created.browser.on('disconnected', () => {
         if (sessions.get(accountId) !== session) return
         sessions.delete(accountId)
-        todayViews.delete(accountId)
+        pendingViews.delete(accountId)
         if (session.timer) clearInterval(session.timer)
         orderSyncCoordinator.cancel(accountId, 'shop')
         publish(accountId, 'disconnected', '店铺后台浏览器已关闭。')

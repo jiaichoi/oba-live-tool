@@ -20,7 +20,7 @@ function currentBeijingDay(): string {
   return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
 }
 
-export default function AutoOrders() {
+export default function AutoOrders({ mode = 'today' }: { mode?: 'today' | 'all' }) {
   const accountId = useAccounts(state => state.currentAccountId)
   const [status, setStatus] = useState<Status | null>(null)
   const [busy, setBusy] = useState(false)
@@ -72,7 +72,8 @@ export default function AutoOrders() {
     } catch { setResult({ ok: false, message: '订单页面读取失败；未保存订单。' }) }
     finally { setBusy(false) }
   }
-  const rows = view?.available && view.scope === 'today_due' && view.day === today && Array.isArray(view.rows) ? view.rows : []
+  const allRows = view?.available && view.scope === 'pending_and_today_due' && view.day === today && Array.isArray(view.rows) ? view.rows : []
+  const rows = mode === 'today' ? allRows.filter(row => row.promised_ship_day === today) : allRows
   const sizes = useMemo(() => [...new Set(rows.map(row => row.size).filter(Boolean))].sort(compareSizes), [rows])
   const groups = useMemo(() => groupMatrixRows(rows), [rows])
   const parents = new Set(rows.map(row => row.shop_order_id)).size
@@ -82,13 +83,15 @@ export default function AutoOrders() {
 
   return <div className="container py-8 space-y-4 min-h-full">
     <div className="flex items-center justify-between gap-4">
-      <Title title="今日应发订单" description="按抖店承诺发货日期筛选北京时间今天；只在本次运行期间展示，不保存订单内容" />
+      <Title title={mode === 'today' ? '今日应发订单' : '全部待发货订单'} description={mode === 'today'
+        ? '按承诺发货日期筛选北京时间今天；只在本次运行期间展示，不保存订单内容'
+        : '展示当前待发货商品子订单；只在本次运行期间展示，不保存订单内容'} />
       <Button onClick={() => void run('organize')} disabled={busy || !connected}>
-        <PlayIcon className="mr-2 h-4 w-4" />{busy ? '整理中…' : '读取今日应发'}
+        <PlayIcon className="mr-2 h-4 w-4" />{busy ? '整理中…' : '读取全部待发货'}
       </Button>
     </div>
     <Card><CardHeader><CardTitle>订单读取</CardTitle></CardHeader><CardContent className="space-y-3 text-sm">
-      <p className="text-muted-foreground">{connected ? '店铺已登录。' : '请先从“打开店铺订单”连接并登录。'} 读取时逐页核对当前待发货订单，再按承诺发货日期筛出今天；关闭应用或跨日后需重新读取。</p>
+      <p className="text-muted-foreground">{connected ? '店铺已登录。' : '请先从“打开店铺订单”连接并登录。'} 读取时逐页核对当前待发货订单；“今日应发”再按承诺发货日期筛选。关闭应用或跨日后需重新读取。</p>
       {result && <p role="status" className={result.ok ? 'text-emerald-700' : 'text-red-700'}>{result.message}</p>}
       <details><summary className="cursor-pointer text-muted-foreground">高级检查</summary>
         <div className="flex flex-wrap gap-2 pt-3">
@@ -98,17 +101,17 @@ export default function AutoOrders() {
       </details>
     </CardContent></Card>
     <Card><CardContent className="pt-6">
-      {viewError ? <p role="status">当天订单暂不可读取；请确认应用运行状态。</p>
-        : !view?.available || view.day !== today ? <p>今天尚未读取订单；本机不展示旧快照。</p>
+      {viewError ? <p role="status">待发货订单暂不可读取；请确认应用运行状态。</p>
+        : !view?.available || view.day !== today ? <p>本次运行尚未读取订单；本机不展示旧快照。</p>
         : <>
           <p className="text-lg font-semibold">{parents} 个主订单、{rows.length} 个商品子订单、{quantity} 件</p>
-          <p className="mt-2 text-sm text-muted-foreground">承诺发货日：{today}（北京时间） · 读取时间：{observed} · {view.page_complete ? '来源页面已读全' : '来源页面未读全'}</p>
-          <p className="mt-1 text-sm text-muted-foreground">来源待发货主订单 {view.source_pending_count ?? '待核'} 个；今日应发 {view.displayed_parent_count ?? '待核'} 个；店铺 ID：{view.shop_id_verified ?? '待核'}。这是读取时点结果，不代表实时同步。</p>
+          <p className="mt-2 text-sm text-muted-foreground">{mode === 'today' ? `承诺发货日：${today}（北京时间） · ` : ''}读取时间：{observed} · {view.page_complete ? '来源页面已读全' : '来源页面未读全'}</p>
+          <p className="mt-1 text-sm text-muted-foreground">来源待发货主订单 {view.source_pending_count ?? '待核'} 个；全部待发货 {view.displayed_parent_count ?? '待核'} 个；今日应发 {new Set(allRows.filter(row => row.promised_ship_day === today).map(row => row.shop_order_id)).size} 个；店铺 ID：{view.shop_id_verified ?? '待核'}。这是读取时点结果，不代表实时同步。</p>
           <Button className="mt-4" variant="outline" onClick={() => setShowDetails(value => !value)}>{showDetails ? '收起子订单' : '查看子订单'}</Button>
           {showDetails && <div className="mt-3 max-h-72 overflow-auto space-y-2">{rows.map(row => <div key={row.sku_order_id} className="border-t pt-2 text-xs">
             {row.shop_order_id} / {row.sku_order_id} · {row.merchant_code || row.product_name} · {row.color}/{row.size} · {row.quantity} 件
           </div>)}</div>}
-          {rows.length === 0 ? <p className="mt-5">今日应发 0 单。</p> :
+          {rows.length === 0 ? <p className="mt-5">{mode === 'today' ? '今日应发 0 单。' : '当前待发货 0 单。'}</p> :
             <div className="mt-5 max-h-[70vh] overflow-auto rounded border"><table className="w-full border-collapse text-sm">
               <thead><tr><th className="sticky top-0 z-10 bg-slate-50 p-3 text-left shadow-sm">商家编码或商品名称 · 颜色/款式/原规格</th>
                 {sizes.map(size => <th key={size} className="sticky top-0 z-10 bg-slate-50 p-3 text-center shadow-sm">{size}</th>)}

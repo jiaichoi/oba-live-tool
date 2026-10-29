@@ -45,7 +45,7 @@ class OrderSyncCoordinator {
     this.activeSources.delete(accountId)
     this.setStatus(accountId, {
       phase: 'idle',
-      message: '店铺连接已断开；本次会话的当天订单已清空。',
+      message: '店铺连接已断开；本次会话的待发货订单已清空。',
       shopId: null,
     })
   }
@@ -80,7 +80,7 @@ class OrderSyncCoordinator {
     }
     const status: OrderSyncStatus = {
       accountId, phase: 'current', shopId,
-      message: `店铺 ${shopId} 当天应发订单已读取：${publishedAt}；本机不保存订单内容。`,
+      message: `店铺 ${shopId} 待发货订单已读取：${publishedAt}；本机不保存订单内容。`,
       lastSuccessAt: publishedAt, updatedAt: new Date().toISOString(),
     }
     this.statuses.set(accountId, status)
