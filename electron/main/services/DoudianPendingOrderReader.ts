@@ -351,18 +351,10 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
     for (let number = 1; number <= MAX_PAGES; number++) {
       if (!currentUrlIsOrderPage(page)) throw new Error('读取过程中离开了官方订单列表页')
       await waitForMatchingTable(page, expectedPageIds)
-      // The status-tab count and pagination can advance before the table rows
-      // finish changing. An old all-status page may contain paid or closed
-      // orders while the pending tab already displays its new count.
-      await page.waitForFunction(() => {
-        if (document.querySelector('.auxo-spin-spinning, .aurora-spin-spinning')) return false
-        const parents = document.querySelectorAll('tr.auxo-table-row-level-0, tr.aurora-table-row-level-0')
-        const children = document.querySelectorAll('tr.auxo-table-row-level-1, tr.aurora-table-row-level-1')
-        return parents.length > 0 && children.length > 0 && Array.from(children).every(row => {
-          const status = row.querySelectorAll(':scope > td')[4]?.textContent?.trim() || ''
-          return status.startsWith('待发货')
-        })
-      }, undefined, { timeout: 30000 })
+      // Parent IDs already match this page's official pending-list response.
+      // Do not require every level-1 row to carry a pending status here: the
+      // shop also renders consumer remarks as ancillary level-1 rows. The
+      // parser below ignores those rows and validates each merchandise row.
       const raw = await page.locator('table tbody tr').evaluateAll(elements => elements.map(row => ({
         className: row.className,
         rowKey: row.getAttribute('data-row-key') || '',
