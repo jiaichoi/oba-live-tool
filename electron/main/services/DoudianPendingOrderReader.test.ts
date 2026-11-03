@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { officialVariantMatchesVisibleLine, parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
+import { isPendingListParent, officialVariantMatchesVisibleLine, parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
+
+describe('official pending-list parent status', () => {
+  const item = (status: string) => ({ sku_order_status_info: { order_status_text: status } })
+  it('accepts a partially shipped parent with pending items', () => {
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '部分发货' },
+      product_item: [item('待发货'), item('已发货')] }), true)
+  })
+  it('rejects a closed parent and a partial parent without pending items', () => {
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '已关闭' },
+      product_item: [item('已关闭')] }), false)
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '部分发货' },
+      product_item: [item('已发货')] }), false)
+  })
+})
 
 describe('visible Doudian parent and merchandise rows', () => {
   it('parses merchandise and ignores an ancillary consumer remark row', () => {

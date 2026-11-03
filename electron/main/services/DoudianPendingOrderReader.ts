@@ -1,4 +1,4 @@
-import type { Page } from 'playwright'
+import type { Page, Response } from 'playwright'
 
 const ORDER_URL = 'https://fxg.jinritemai.com/ffa/morder/order/list'
 const MAX_PAGES = 100
@@ -55,17 +55,50 @@ export function pendingCaptureFingerprint(capture: PendingOrderCapture): string 
 
 type RawRow = { className: string; rowKey?: string; cells: string[]; statusTitles?: string[] }
 
-async function waitForPendingListResponse(page: Page): Promise<string[]> {
-  const response = await page.waitForResponse(async candidate => {
+/** A partial parent remains in the official pending list while at least one item awaits shipment. */
+export function isPendingListParent(parent: Record<string, unknown>): boolean {
+  const status = (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text
+  const items = parent.product_item
+  if (!Array.isArray(items) || items.length === 0) return false
+  const childStatuses = items.map(item =>
+    (item as { sku_order_status_info?: { order_status_text?: string } })?.sku_order_status_info?.order_status_text)
+  if (status === '待发货') return childStatuses.every(child => typeof child === 'string' && child.startsWith('待发货'))
+  if (status === '部分发货') return childStatuses.some(child => typeof child === 'string' && child.startsWith('待发货')) &&
+    childStatuses.every(child => typeof child === 'string' && (child.startsWith('待发货') || child === '已发货'))
+  return false
+}
+
+async function waitForPendingListResponse(page: Page, phase: string): Promise<string[]> {
+  const observations: string[] = []
+  const matchesPendingList = async (candidate: Response) => {
     try {
       const url = new URL(candidate.url())
-      if (url.hostname !== 'fxg.jinritemai.com' || !url.pathname.endsWith('/api/order/searchlist') ||
-          candidate.status() !== 200) return false
+      if (url.hostname !== 'fxg.jinritemai.com' || !url.pathname.includes('/order/')) return false
+      if (observations.length < 20) observations.push(`${url.pathname}:${candidate.status()}`)
+      if (!/\/api\/order\/searchlist$/i.test(url.pathname) || candidate.status() !== 200) return false
       const body = await candidate.json() as { data?: Array<Record<string, unknown>> }
-      return Array.isArray(body.data) && body.data.every(parent =>
-        (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text === '待发货')
+      if (observations.length < 20) observations.push(`searchlist:data=${Array.isArray(body.data) ? body.data.length : typeof body.data};pending=${Array.isArray(body.data) ? body.data.filter(parent => String((parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text ?? '').startsWith('待发货')).length : 'n/a'}`)
+      if (Array.isArray(body.data) && observations.length < 20) {
+        const statuses = new Map<string, number>()
+        for (const parent of body.data) {
+          const status = String((parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text ?? '缺失')
+          statuses.set(status, (statuses.get(status) ?? 0) + 1)
+        }
+        observations.push(`状态分布=${[...statuses].map(([status, count]) => `${status}:${count}`).join('|')}`)
+        const childStatuses = new Map<string, number>()
+        for (const parent of body.data) for (const item of (Array.isArray(parent.product_item) ? parent.product_item : [])) {
+          if (!item || typeof item !== 'object') continue
+          const status = String(((item as Record<string, unknown>).sku_order_status_info as { order_status_text?: string } | undefined)?.order_status_text ?? '缺失')
+          childStatuses.set(status, (childStatuses.get(status) ?? 0) + 1)
+        }
+        observations.push(`商品单状态=${[...childStatuses].map(([status, count]) => `${status}:${count}`).join('|')}`)
+      }
+      return Array.isArray(body.data) && body.data.every(isPendingListParent)
     } catch { return false }
-  }, { timeout: 30000 })
+  }
+  const response = await page.waitForResponse(matchesPendingList, { timeout: 30000 }).catch(error => {
+    throw new Error(`待发货响应未通过（${phase}）；观察到：${observations.join(', ') || '无订单相关响应'}；${String(error)}`)
+  })
   const body = await response.json() as { data: Array<Record<string, unknown>> }
   const ids = body.data.map(parent => String(parent.shop_order_id ?? ''))
   if (ids.some(id => !/^\d{19}$/.test(id)) || new Set(ids).size !== ids.length)
@@ -311,7 +344,7 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
       await alternateStatus.click({ timeout: 5000 })
       await page.locator('.auxo-spin-spinning, .aurora-spin-spinning').first().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined)
     }
-    const firstResponse = waitForPendingListResponse(page)
+    const firstResponse = waitForPendingListResponse(page, '首屏切换')
     try { await pending.click({ timeout: 5000 }) } catch {
       await firstResponse.catch(() => undefined)
       partition.issues.push(`${key} 待发货状态标签切换时消失；此分区未采集`)
@@ -387,7 +420,7 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
       }
       const active = page.locator('li.auxo-pagination-item-active, li.aurora-pagination-item-active').first()
       const before = await active.innerText().catch(() => String(number))
-      const nextResponse = waitForPendingListResponse(page)
+      const nextResponse = waitForPendingListResponse(page, `第 ${number + 1} 页`)
       await next.locator('button').click()
       expectedPageIds = await nextResponse
       await page.waitForFunction(previous => {

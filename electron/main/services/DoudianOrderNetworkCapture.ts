@@ -35,7 +35,7 @@ export function observeOrderResponses(page: Page) {
     let url: URL
     try { url = new URL(response.url()) } catch { return }
     if (url.protocol !== 'https:' || !(url.hostname === 'jinritemai.com' || url.hostname.endsWith('.jinritemai.com'))) return
-    if (url.pathname !== '/api/order/searchlist' && url.pathname !== '/b/a/api/v1/reach/list') return
+    if (!/^\/api\/order\/searchlist$/i.test(url.pathname) && url.pathname !== '/b/a/api/v1/reach/list') return
     if (!response.headers()['content-type']?.includes('json')) return
     jobs.push((async () => {
       try {

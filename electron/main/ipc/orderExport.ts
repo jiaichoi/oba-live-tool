@@ -4,7 +4,7 @@ import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
 import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
-import { capturePendingOrderPages, ensureRecentSixMonthPartition, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
+import { capturePendingOrderPages, ensureRecentSixMonthPartition, isPendingListParent, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import { beijingDay, promisedShipDay } from '../services/DoudianDueDay'
 import windowManager from '../windowManager'
@@ -54,21 +54,29 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
     official_item: Record<string, unknown>;
     variant: { color: string; size: string; role: 'color' | 'raw_spec' } | null;
     promisedShipDay: string }>()
+  const excludedShippedItems = new Set<string>()
   for (const response of evidence) {
-    if (!response.path.endsWith('/api/order/searchlist')) continue
+    if (!/\/api\/order\/searchlist$/i.test(response.path)) continue
     const data = (response.fields as { data?: unknown }).data
     if (!Array.isArray(data)) continue
-    if ((data as Array<Record<string, unknown>>).some(parent =>
-      (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text !== '待发货')) continue
+    if (!(data as Array<Record<string, unknown>>).every(isPendingListParent)) continue
     for (const parent of data as Array<Record<string, unknown>>) {
       const parentId = String(parent.shop_order_id ?? '')
       const dueDay = promisedShipDay(parent.exp_ship_time)
       for (const item of (parent.product_item as Array<Record<string, unknown>> | undefined) ?? []) {
         const childId = String(item.item_order_id ?? '')
         const childStatus = (item.sku_order_status_info as { order_status_text?: string } | undefined)?.order_status_text
-        if (!/^\d{19}$/.test(parentId) || !/^\d{19}$/.test(childId) || childStatus !== '待发货')
+        if (!/^\d{19}$/.test(parentId) || !/^\d{19}$/.test(childId))
           throw new Error('官方列表商品子订单编号或状态未核实')
         const key = `${parentId}:${childId}`
+        if (childStatus === '已发货' &&
+            (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text === '部分发货') {
+          if (products.has(key)) throw new Error('同一商品子订单在待发货与已发货间发生变化；未更新结果')
+          excludedShippedItems.add(key)
+          continue
+        }
+        if (!String(childStatus ?? '').startsWith('待发货') || excludedShippedItems.has(key))
+          throw new Error('官方列表商品子订单状态不一致；未更新结果')
         if (products.has(key)) {
           if (products.get(key)?.promisedShipDay !== dueDay)
             throw new Error('同一商品子订单的承诺发货日期不一致；未生成当天订单')
@@ -90,8 +98,13 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
     const childId = String(line.skuOrderId ?? '').slice(0, 19)
     const key = `${line.parentId}:${childId}`
     const item = products.get(key)
-    // The shop sometimes renders an ancillary consumer remark as a duplicate row.
-    if (!item) continue
+    // A partial parent can show already-shipped item rows. They are excluded
+    // only when the official response identifies that exact item as shipped.
+    if (!item) {
+      if (excludedShippedItems.has(key) && line.orderStatus.startsWith('已发货')) continue
+      if (line.skuOrderId) throw new Error('页面商品行未能与官方待发货或已发货子订单对应')
+      continue
+    }
     if (line.promisedShipAt && line.promisedShipAt.slice(0, 10) !== item.promisedShipDay)
       throw new Error('页面与官方承诺发货日期不一致；未生成当天订单')
     if (item.variant && !officialVariantMatchesVisibleLine(item.official_item, line, item.variant))
