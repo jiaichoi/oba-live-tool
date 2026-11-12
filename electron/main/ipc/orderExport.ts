@@ -4,9 +4,10 @@ import { IPC_CHANNELS } from 'shared/ipcChannels'
 import { browserManager } from '../managers/BrowserSessionManager'
 import { orderSyncCoordinator } from '../services/OrderSyncCoordinator'
 import { probeOpenOrderPages } from '../services/DoudianOrderPageProbe'
-import { capturePendingOrderPages, ensureRecentSixMonthPartition, isPendingListParent, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
+import { capturePendingOrderPages, ensureRecentSixMonthPartition, isPendingListParent, officialVariantMatchesVisibleLine, parseStructuredVariant, pendingCaptureFingerprint, pendingStatusIsSelected, type PendingOrderCapture } from '../services/DoudianPendingOrderReader'
 import { observeOrderResponses, type OrderNetworkEvidence } from '../services/DoudianOrderNetworkCapture'
 import { beijingDay, promisedShipDay } from '../services/DoudianDueDay'
+import { loadDoudianSessionState, saveDoudianSessionState } from '../services/DoudianSessionState'
 import windowManager from '../windowManager'
 
 const ORDER_LIST_URL = 'https://fxg.jinritemai.com/ffa/morder/order/list'
@@ -14,7 +15,7 @@ const LOGGED_IN_SELECTOR = '[class^="index_userName"]'
 type Phase = 'disconnected' | 'opening' | 'browser-open' | 'login-required' | 'logged-in-unverified' | 'failed'
 type Status = { accountId: string; phase: Phase; message: string; updatedAt: string }
 type ShopSession = { browser: Browser; context: BrowserContext; timer: ReturnType<typeof setInterval> | null;
-  landingAttempted: boolean; landingInProgress: boolean; pendingAttempted: boolean }
+  landingAttempted: boolean; landingInProgress: boolean; pendingAttempted: boolean; lastStateSavedAt: number }
 const sessions = new Map<string, ShopSession>()
 const opening = new Set<string>()
 const statuses = new Map<string, Status>()
@@ -42,6 +43,7 @@ function shopIdFromEvidence(evidence: OrderNetworkEvidence[]): string | null {
 
 export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetworkEvidence[]): OrganizedRow[] {
   const partition = capture.partitions[0]
+  if (partition?.issues.length) throw new Error(`待发货范围或订单行未通过核验：${partition.issues[0]}；未更新当天结果`)
   if (!capture.complete || !/^\d{5,}$/.test(String(capture.visibleShopId ?? '')) ||
       !partition || capture.partitions.length !== 1 || partition.key !== 'recent_6_months' ||
       partition.displayedPendingCount === null || !partition.endedAtLastPage)
@@ -191,6 +193,10 @@ async function inspectLogin(accountId: string) {
     }
     try {
       if (await page.locator(LOGGED_IN_SELECTOR).count() > 0) {
+        if (Date.now() - session.lastStateSavedAt > 300_000) {
+          session.lastStateSavedAt = Date.now()
+          await saveDoudianSessionState(accountId, session.context).catch(() => { session.lastStateSavedAt = 0 })
+        }
         if (url.pathname !== '/ffa/morder/order/list' && !session.landingAttempted && !session.landingInProgress) {
           session.landingAttempted = true
           session.landingInProgress = true
@@ -305,11 +311,31 @@ export function setupOrderExportIpcHandlers() {
       await ensureRecentSixMonthPartition(page)
       await page.getByRole('tab', { name: /待发货/ }).first()
         .waitFor({ state: 'visible', timeout: 30000 })
+      if (!await pendingStatusIsSelected(page)) {
+        await page.getByRole('tab', { name: /待发货/ }).first().click({ timeout: 5000 })
+        if (!await pendingStatusIsSelected(page))
+          throw new Error('刷新后未明确选中官方待发货标签；未更新当天结果')
+      }
       const capture = await capturePendingOrderPages(page)
+      if (capture.partitions.some(part => part.issues.length || !part.endedAtLastPage))
+        throw new Error(`首次逐页读取未完成：${capture.partitions.flatMap(part => part.issues).slice(0, 2).join('；') || '未到达末页'}`)
       const check = await capturePendingOrderPages(page)
+      if (check.partitions.some(part => part.issues.length || !part.endedAtLastPage))
+        throw new Error(`复核逐页读取未完成：${check.partitions.flatMap(part => part.issues).slice(0, 2).join('；') || '未到达末页'}`)
       const evidence = await stopObserving()
-      if (pendingCaptureFingerprint(capture) !== pendingCaptureFingerprint(check))
-        throw new Error('两次逐页读取的订单身份、状态或数量不一致；未更新当天结果')
+      if (pendingCaptureFingerprint(capture) !== pendingCaptureFingerprint(check)) {
+        const left = JSON.parse(pendingCaptureFingerprint(capture)) as Array<{ count: number; lastPage: boolean; pageCount: number; parentCount: number; lines: string[] }>
+        const right = JSON.parse(pendingCaptureFingerprint(check)) as typeof left
+        const differences = left.map((part, index) => {
+          const other = right[index]
+          if (!other) return `分区 ${index + 1} 缺失`
+          const counts = `主订单 ${part.count}/${other.count}，页数 ${part.pageCount}/${other.pageCount}，页面主订单 ${part.parentCount}/${other.parentCount}，商品行 ${part.lines.length}/${other.lines.length}`
+          const added = other.lines.filter(line => !part.lines.includes(line)).length
+          const removed = part.lines.filter(line => !other.lines.includes(line)).length
+          return `${counts}，商品行变化 +${added}/-${removed}`
+        }).join('；')
+        throw new Error(`两次逐页读取不一致（${differences}）；未更新当天结果`)
+      }
       const observedShopId = shopIdFromEvidence(evidence)
       if (capture.visibleShopId && observedShopId && capture.visibleShopId !== observedShopId)
         throw new Error('页面与官方会话中的店铺 ID 不一致；未更新当天结果')
@@ -349,9 +375,10 @@ export function setupOrderExportIpcHandlers() {
     publish(accountId, 'opening', '正在打开独立的店铺后台浏览器…')
     try {
       if (chromePath) browserManager.setChromePath(chromePath)
-      const created = await browserManager.createSession(false)
+      const savedState = await loadDoudianSessionState(accountId)
+      const created = await browserManager.createSession(false, savedState)
       const session: ShopSession = { browser: created.browser, context: created.context, timer: null,
-        landingAttempted: false, landingInProgress: false, pendingAttempted: false }
+        landingAttempted: false, landingInProgress: false, pendingAttempted: false, lastStateSavedAt: 0 }
       sessions.set(accountId, session)
       created.context.on('page', page => attachPage(accountId, page))
       attachPage(accountId, created.page)

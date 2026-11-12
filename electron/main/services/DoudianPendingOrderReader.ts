@@ -46,10 +46,11 @@ export function pendingCaptureFingerprint(capture: PendingOrderCapture): string 
   return JSON.stringify(capture.partitions.map(partition => ({
     count: partition.displayedPendingCount,
     lastPage: partition.endedAtLastPage,
-    pages: partition.pages.map(page => ({ number: page.number, parents: page.parentCount,
-      lines: page.lines.map(line => [line.parentId, line.skuOrderId, line.productName,
+    pageCount: partition.pages.length,
+    parentCount: partition.pages.reduce((sum, page) => sum + page.parentCount, 0),
+    lines: partition.pages.flatMap(page => page.lines.map(line => [line.parentId, line.skuOrderId, line.productName,
         line.quantity, line.orderStatus.startsWith('待发货') ? '待发货' : line.orderStatus,
-        line.aftersaleStatus]) })),
+        line.aftersaleStatus])).map(line => JSON.stringify(line)).sort(),
   })))
 }
 
@@ -303,6 +304,28 @@ export async function ensureRecentSixMonthPartition(page: Page): Promise<void> {
   if (!recentVisible || olderVisible) throw new Error('未确认当前选中近6个月订单；旧快照未改动')
 }
 
+/** Prove that the pending status itself, rather than a surrounding tab group, is active. */
+export async function pendingStatusIsSelected(page: Page): Promise<boolean> {
+  const pending = page.getByRole('tab', { name: /^待发货/ }).first()
+  if (await pending.count() !== 1) return false
+  return pending.evaluate(node => {
+    if (node.getAttribute('aria-selected') !== 'true') return false
+    const group = node.closest('[role="tablist"], [class*="tabs-nav-list"]')
+    if (!group) return false
+    const active = Array.from(group.querySelectorAll('[role="tab"]'))
+      .filter(node => node.getAttribute('aria-selected') === 'true')
+    return active.length === 1 && active[0] === node
+  })
+}
+
+export async function waitForPendingStatusSelected(page: Page): Promise<boolean> {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    if (await pendingStatusIsSelected(page)) return true
+    await page.waitForTimeout(250)
+  }
+  return false
+}
+
 /** Read only the recent-six-month pending partition requested by the user. */
 export async function capturePendingOrderPages(page: Page): Promise<PendingOrderCapture> {
   if (!currentUrlIsOrderPage(page)) throw new Error('当前不是抖店官方订单列表页')
@@ -331,8 +354,12 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
     // An already selected pending tab can reuse cached rows. Switch through
     // the official all-status tab so the pending list emits a fresh response
     // for the item-by-item cross-check in organizePending.
-    const wasPendingSelected = await pending.evaluate(node => node.getAttribute('aria-selected') === 'true' ||
-      Boolean(node.closest('.auxo-tabs-tab-active, .aurora-tabs-tab-active')))
+    const wasPendingSelected = await pendingStatusIsSelected(page)
+    if (!wasPendingSelected) {
+      partition.issues.push('官方页面当前并未明确选中待发货（可能处于全部订单）；已中止读取，旧快照未改动')
+      result.partitions.push(partition)
+      continue
+    }
     if (wasPendingSelected) {
       const alternateStatus = pending.locator('xpath=ancestor::*[contains(@class,"tabs-nav-list")][1]')
         .locator('.auxo-tabs-tab, .aurora-tabs-tab').filter({ hasNotText: /待发货/ }).first()
@@ -344,15 +371,18 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
       await alternateStatus.click({ timeout: 5000 })
       await page.locator('.auxo-spin-spinning, .aurora-spin-spinning').first().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined)
     }
-    const firstResponse = waitForPendingListResponse(page, '首屏切换')
-    try { await pending.click({ timeout: 5000 }) } catch {
-      await firstResponse.catch(() => undefined)
-      partition.issues.push(`${key} 待发货状态标签切换时消失；此分区未采集`)
-      result.partitions.push(partition)
-      continue
+    let expectedPageIds: string[] = []
+    let selectedAfterClick = false
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const firstResponse = waitForPendingListResponse(page, `首屏切换 ${attempt + 1}`)
+      try { await pending.click({ timeout: 5000 }) } catch {
+        await firstResponse.catch(() => undefined)
+        break
+      }
+      expectedPageIds = await firstResponse
+      await page.locator('.auxo-spin-spinning, .aurora-spin-spinning').first().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined)
+      if (await waitForPendingStatusSelected(page)) { selectedAfterClick = true; break }
     }
-    let expectedPageIds = await firstResponse
-    await page.locator('.auxo-spin-spinning, .aurora-spin-spinning').first().waitFor({ state: 'hidden', timeout: 15000 }).catch(() => undefined)
     const pendingText = await pending.innerText({ timeout: 5000 }).catch(() => '')
     if (!pendingText) {
       partition.issues.push(`${key} 待发货状态标签读取时消失；此分区未采集`)
@@ -361,9 +391,18 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
     }
     const displayedPendingCount = Number(pendingText.match(/待发货\s*(\d+)/)?.[1])
     partition.displayedPendingCount = Number.isFinite(displayedPendingCount) ? displayedPendingCount : null
-    const pendingSelected = await pending.evaluate(node => node.getAttribute('aria-selected') === 'true' ||
-      Boolean(node.closest('.auxo-tabs-tab-active, .aurora-tabs-tab-active')))
-    if (!pendingSelected) partition.issues.push('未证明待发货筛选处于选中状态')
+    const pendingSelected = selectedAfterClick && await pendingStatusIsSelected(page)
+    if (!pendingSelected) {
+      const tabState = await pending.evaluate(node => {
+        const group = node.closest('[role="tablist"], [class*="tabs-nav-list"]')
+        const selected = Array.from(group?.querySelectorAll('[role="tab"][aria-selected="true"]') ?? [])
+          .map(tab => tab.textContent?.replace(/\s+/g, ' ').trim().slice(0, 20) ?? '')
+        return `目标 aria=${node.getAttribute('aria-selected') ?? '无'} class=${node.className}; 同组已选=${selected.join('|') || '无'}`
+      }).catch(() => '标签不可读取')
+      partition.issues.push(`官方页面未明确选中待发货（${tabState}）；已中止读取，旧快照未改动`)
+      result.partitions.push(partition)
+      continue
+    }
     if (displayedPendingCount === 0) {
       if (expectedPageIds.length !== 0) partition.issues.push('页面显示0单，但官方列表响应仍有订单')
       const recentSelected = await ensureRecentSixMonthPartition(page).then(() => true).catch(() => false)
@@ -383,6 +422,7 @@ export async function capturePendingOrderPages(page: Page): Promise<PendingOrder
     const seen = new Set<string>()
     for (let number = 1; number <= MAX_PAGES; number++) {
       if (!currentUrlIsOrderPage(page)) throw new Error('读取过程中离开了官方订单列表页')
+      if (!await pendingStatusIsSelected(page)) throw new Error(`第 ${number} 页读取前未确认官方待发货筛选；旧快照未改动`)
       await waitForMatchingTable(page, expectedPageIds)
       // Parent IDs already match this page's official pending-list response.
       // Do not require every level-1 row to carry a pending status here: the

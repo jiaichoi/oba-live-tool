@@ -47,6 +47,7 @@ jobs:
       # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings 
       - name: Extract changelog
         id: changelog
+        shell: bash
         run: | 
           echo "notes<<EOF" >> $GITHUB_OUTPUT
           node scripts/extract-changelog.js >> $GITHUB_OUTPUT  
@@ -59,6 +60,7 @@ jobs:
           body: ${{ steps.changelog.outputs.notes }} # 拿到上一步提取出的 changelog 内容
           files: |
             release/*/*.exe
+            release/*/*.zip
             release/*/*.dmg
             release/*/*.blockmap
             release/*/latest*.yml

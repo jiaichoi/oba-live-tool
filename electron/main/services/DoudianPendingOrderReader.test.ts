@@ -51,6 +51,21 @@ describe('visible Doudian parent and merchandise rows', () => {
     line.orderStatus = '已发货'
     assert.notEqual(pendingCaptureFingerprint(capture), first)
   })
+  it('compares the same order rows consistently when their display order changes', () => {
+    const base = { parentId: '1234567890123456789', productName: '商品', quantity: 1,
+      orderStatus: '待发货', aftersaleStatus: '-' }
+    const lines = [
+      { ...base, skuOrderId: '2234567890123456789' },
+      { ...base, skuOrderId: '3234567890123456789' },
+    ]
+    const capture = { partitions: [{ displayedPendingCount: 1, endedAtLastPage: true,
+      pages: [{ number: 1, parentCount: 1, lines }] }] } as PendingOrderCapture
+    const first = pendingCaptureFingerprint(capture)
+    lines.reverse()
+    assert.equal(pendingCaptureFingerprint(capture), first)
+    lines[0].quantity = 2
+    assert.notEqual(pendingCaptureFingerprint(capture), first)
+  })
   it('reads structured SKU property names and values without a colour list', () => {
     assert.deepEqual(parseStructuredVariant({ sku_properties: [
       { name: '颜色分类', value: '月影蓝' }, { name: '尺码', value: '加大号' },
