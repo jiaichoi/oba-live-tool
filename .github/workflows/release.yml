@@ -1,4 +1,5 @@
 name: Release
+# A [publish] commit on main rebuilds the current package version's release assets.
 
 on:
   push:
