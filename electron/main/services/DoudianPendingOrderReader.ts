@@ -56,17 +56,26 @@ export function pendingCaptureFingerprint(capture: PendingOrderCapture): string 
 
 type RawRow = { className: string; rowKey?: string; cells: string[]; statusTitles?: string[] }
 
-/** A partial parent remains in the official pending list while at least one item awaits shipment. */
+/** Only known terminal child states may be ignored in an official pending-list parent. */
+export function pendingListChildDisposition(parentStatus: unknown, childStatus: unknown): 'pending' | 'excluded' | null {
+  if (typeof parentStatus !== 'string' || typeof childStatus !== 'string') return null
+  if (childStatus.startsWith('待发货') &&
+      (parentStatus === '待发货' || parentStatus === '部分发货' || parentStatus === '部分关闭')) return 'pending'
+  if (childStatus === '已关闭' &&
+      (parentStatus === '待发货' || parentStatus === '部分发货' || parentStatus === '部分关闭')) return 'excluded'
+  if (childStatus === '已发货' &&
+      (parentStatus === '部分发货' || parentStatus === '部分关闭')) return 'excluded'
+  return null
+}
+
+/** A mixed parent remains in the official pending list while at least one item awaits shipment. */
 export function isPendingListParent(parent: Record<string, unknown>): boolean {
   const status = (parent.order_status_info as { order_status_text?: string } | undefined)?.order_status_text
   const items = parent.product_item
   if (!Array.isArray(items) || items.length === 0) return false
-  const childStatuses = items.map(item =>
-    (item as { sku_order_status_info?: { order_status_text?: string } })?.sku_order_status_info?.order_status_text)
-  if (status === '待发货') return childStatuses.every(child => typeof child === 'string' && child.startsWith('待发货'))
-  if (status === '部分发货') return childStatuses.some(child => typeof child === 'string' && child.startsWith('待发货')) &&
-    childStatuses.every(child => typeof child === 'string' && (child.startsWith('待发货') || child === '已发货'))
-  return false
+  const dispositions = items.map(item => pendingListChildDisposition(status,
+    (item as { sku_order_status_info?: { order_status_text?: string } })?.sku_order_status_info?.order_status_text))
+  return dispositions.some(disposition => disposition === 'pending') && dispositions.every(Boolean)
 }
 
 async function waitForPendingListResponse(page: Page, phase: string): Promise<string[]> {
