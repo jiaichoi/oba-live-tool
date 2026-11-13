@@ -1,12 +1,31 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { isPendingListParent, officialVariantMatchesVisibleLine, parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, type PendingOrderCapture } from './DoudianPendingOrderReader'
+import { isPendingListParent, officialVariantMatchesVisibleLine, parseStructuredVariant, parseVisibleRows, pendingCaptureFingerprint, pendingListChildDisposition, type PendingOrderCapture } from './DoudianPendingOrderReader'
 
 describe('official pending-list parent status', () => {
   const item = (status: string) => ({ sku_order_status_info: { order_status_text: status } })
   it('accepts a partially shipped parent with pending items', () => {
     assert.equal(isPendingListParent({ order_status_info: { order_status_text: '部分发货' },
       product_item: [item('待发货'), item('已发货')] }), true)
+  })
+  it('classifies pending merchandise beside a closed child', () => {
+    for (const parentStatus of ['待发货', '部分关闭', '部分发货']) {
+      assert.equal(isPendingListParent({ order_status_info: { order_status_text: parentStatus },
+        product_item: [item('待发货'), item('已关闭')] }), true)
+      assert.equal(pendingListChildDisposition(parentStatus, '待发货'), 'pending')
+      assert.equal(pendingListChildDisposition(parentStatus, '已关闭'), 'excluded')
+    }
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '部分关闭' },
+      product_item: [item('待发货'), item('已发货'), item('已关闭')] }), true)
+  })
+  it('rejects terminal-only and unrecognized mixed statuses', () => {
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '部分关闭' },
+      product_item: [item('已关闭')] }), false)
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '待发货' },
+      product_item: [item('待发货'), item('已发货')] }), false)
+    assert.equal(isPendingListParent({ order_status_info: { order_status_text: '部分关闭' },
+      product_item: [item('待发货'), item('未知状态')] }), false)
+    assert.equal(pendingListChildDisposition('待发货', '已发货'), null)
   })
   it('rejects a closed parent and a partial parent without pending items', () => {
     assert.equal(isPendingListParent({ order_status_info: { order_status_text: '已关闭' },
@@ -17,6 +36,23 @@ describe('official pending-list parent status', () => {
 })
 
 describe('visible Doudian parent and merchandise rows', () => {
+  it('keeps the exact child IDs and statuses when one merchandise row is closed', () => {
+    const result = parseVisibleRows([
+      { className: 'aurora-table-row aurora-table-row-level-0', cells: ['',
+        '订单编号 1234567890123456789 下单时间 2026-11-13 09:20:00'] },
+      { className: 'aurora-table-row aurora-table-row-level-1', cells: ['',
+        '羊毛裤 黑色/L x1 商家编码:54628BNYB 商品单ID:2234567890123456789',
+        '¥139.00 x1', '-', '待发货 承诺发货时间 2026-11-14 18:00:00'] },
+      { className: 'aurora-table-row aurora-table-row-level-1', cells: ['',
+        '羊毛裤 黑色/XL x1 商家编码:54628BNYB 商品单ID:3234567890123456789',
+        '¥139.00 x1', '-', '已关闭'] },
+    ])
+    assert.equal(result.parentCount, 1)
+    assert.deepEqual(result.lines.map(line => [line.skuOrderId, line.orderStatus]), [
+      ['2234567890123456789', '待发货 承诺发货时间 2026-11-14 18:00:00'],
+      ['3234567890123456789', '已关闭'],
+    ])
+  })
   it('parses merchandise and ignores an ancillary consumer remark row', () => {
     const result = parseVisibleRows([
       { className: 'aurora-table-measure-row', cells: ['', '商品信息'] },
