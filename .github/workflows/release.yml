@@ -6,10 +6,12 @@ on:
       - main
     tags:
       - 'v*'
+  release:
+    types: [published, edited]
 
 jobs:
   release:
-    if: github.ref_type == 'tag' || contains(github.event.head_commit.message, '[publish]')
+    if: github.event_name == 'release' || github.ref_type == 'tag' || contains(github.event.head_commit.message, '[publish]')
     permissions:
       contents: write
     runs-on: ${{ matrix.os }}
@@ -26,6 +28,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
+
+      - name: Verify release tag matches package version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          EXPECTED_TAG="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package version $EXPECTED_TAG" >&2
+            exit 1
+          fi
 
       - name: install dependencies
         run: npm ci
