@@ -50,12 +50,12 @@ export default function Sidebar() {
     },
     {
       id: '/orders/to-order',
-      name: '待下单订单',
+      name: '待下单',
       icon: <ClipboardList className="w-5 h-5" />,
     },
     {
       id: '/orders/manual-shipped',
-      name: '已发货订单（本机标记）',
+      name: '已发货订单',
       icon: <PackageCheck className="w-5 h-5" />,
     },
   ]

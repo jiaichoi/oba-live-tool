@@ -81,7 +81,11 @@ if (process.platform === 'win32') app.setAppUserModelId(app.getName())
 
 // Keep the independent desktop app's state separate from older OBA installs.
 // This also gives it its own single-instance lock and starts with no saved tasks.
-if (app.isPackaged) {
+const candidateMode = process.argv.includes('--candidate')
+if (candidateMode) {
+  app.setName('线上经营工具候选')
+  app.setPath('userData', path.join(app.getPath('appData'), `线上经营工具候选-${app.getVersion()}`))
+} else if (app.isPackaged) {
   app.setPath('userData', path.join(app.getPath('appData'), '线上经营工具'))
 }
 
@@ -222,7 +226,7 @@ ipcMain.handle(IPC_CHANNELS.workbench.reloadDue, event => {
 
 async function createWindow() {
   win = new BrowserWindow({
-    title: `线上经营工具 - v${app.getVersion()}`,
+    title: `${candidateMode ? '线上经营工具候选' : '线上经营工具'} - v${app.getVersion()}`,
     width: 1280,
     height: 800,
     autoHideMenuBar: app.isPackaged,

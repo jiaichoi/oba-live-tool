@@ -137,6 +137,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
 }
 
 type PendingView = { available: true; scope: 'pending_and_today_due'; observed_at: string; day: string;
+  source_partition: 'recent_6_months'; source_status: 'pending'; page_count: number;
   page_complete: true; displayed_parent_count: number; source_pending_count: number;
   shop_id_verified: string; account_bound: true; rows: OrganizedRow[] }
 const pendingViews = new Map<string, PendingView>()
@@ -144,7 +145,8 @@ const pendingViews = new Map<string, PendingView>()
 function publishOrganized(accountId: string, capture: PendingOrderCapture, rows: OrganizedRow[]): PendingView {
   const day = beijingDay(new Date(capture.finishedAt))
   const output: PendingView = { available: true, scope: 'pending_and_today_due', observed_at: capture.finishedAt,
-    day, page_complete: true, displayed_parent_count: new Set(rows.map(row => row.shop_order_id)).size,
+    day, source_partition: 'recent_6_months', source_status: 'pending',
+    page_count: capture.partitions[0].pages.length, page_complete: true, displayed_parent_count: new Set(rows.map(row => row.shop_order_id)).size,
     source_pending_count: capture.partitions[0].displayedPendingCount!,
     shop_id_verified: capture.visibleShopId!, account_bound: true, rows }
   pendingViews.set(accountId, output)
@@ -296,13 +298,14 @@ export function setupOrderExportIpcHandlers() {
     }
   })
   ipcMain.handle(IPC_CHANNELS.orderExport.organizePending, async (_event, accountId: string) => {
+    if (organizing.has(accountId)) return { ok: false, message: '已有一次订单整理正在进行。' }
+    pendingViews.delete(accountId) // Invalidate before any failed-login or missing-page return.
     const session = sessions.get(accountId)
     if (!session || statusOf(accountId).phase !== 'logged-in-unverified')
       return { ok: false, message: '店铺后台未登录；未更新当天结果。' }
     const page = session.context.pages().find(candidate => !candidate.isClosed() &&
       candidate.url().startsWith(ORDER_LIST_URL))
     if (!page) return { ok: false, message: '未找到官方订单列表页；未更新当天结果。' }
-    if (organizing.has(accountId)) return { ok: false, message: '已有一次订单整理正在进行。' }
     organizing.add(accountId)
     const stopObserving = observeOrderResponses(page)
     try {
@@ -351,7 +354,7 @@ export function setupOrderExportIpcHandlers() {
       return { ok: true, parents: view.displayed_parent_count, children: view.rows.length,
         quantity: view.rows.reduce((sum, row) => sum + row.quantity, 0),
         empty: view.rows.length === 0, observedAt: capture.finishedAt,
-        message: `全部待发货：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；今日应发 ${new Set(todayRows.map(row => row.shop_order_id)).size} 个主订单。来源已核对 ${view.source_pending_count} 个待发货主订单；结果仅保存在本次运行内存中。` }
+        message: `近6个月全部待发货：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；今日应发 ${new Set(todayRows.map(row => row.shop_order_id)).size} 个主订单。来源已核对 ${view.source_pending_count} 个待发货主订单；结果仅保存在本次运行内存中。` }
     } catch (error) {
       await stopObserving().catch(() => undefined)
       return { ok: false, message: `订单整理未通过核对：${error instanceof Error ? error.message : '未知错误'}；未保存订单。` }

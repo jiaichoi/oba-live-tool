@@ -304,6 +304,8 @@ export async function ensureRecentSixMonthPartition(page: Page): Promise<void> {
   const tab = page.getByRole('tab', { name: label }).first()
   if (await tab.count() === 1 && await tab.isVisible()) {
     if (await tab.getAttribute('aria-selected') !== 'true') await tab.click()
+    if (await tab.getAttribute('aria-selected') !== 'true')
+      throw new Error('未确认近6个月时间分区已选中；已停止读取')
     return
   }
   const recentLabels = await page.getByText(/^近\s*6\s*个月订单$/).all()

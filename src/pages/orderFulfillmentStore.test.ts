@@ -1,78 +1,85 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { filterRowsByFulfillment, orderScopeKey, useOrderFulfillmentStore } from './orderFulfillmentStore'
+import { pendingRows, rowScopeKey, useOrderFulfillmentStore, type BatchInput } from './orderFulfillmentStore'
 
-test('manual fulfillment marks move an order between in-memory categories and can be undone', () => {
-  const scope = { accountId: 'account-a', day: '2026-11-14', shopOrderId: 'order-1' }
-  useOrderFulfillmentStore.getState().restorePending(scope)
-  useOrderFulfillmentStore.getState().markToOrder(scope)
-  assert.equal(useOrderFulfillmentStore.getState().marks[orderScopeKey(scope)], 'to-order')
-  useOrderFulfillmentStore.getState().markShipped(scope)
-  assert.equal(useOrderFulfillmentStore.getState().marks[orderScopeKey(scope)], 'shipped')
-  useOrderFulfillmentStore.getState().restorePending(scope)
-  assert.equal(useOrderFulfillmentStore.getState().marks[orderScopeKey(scope)], undefined)
+const row = (parent: string, child: string, quantity = 1, due = '2026-11-14') => ({
+  shop_order_id: parent, sku_order_id: child, quantity, merchant_code: 'DEMO',
+  product_id: 'product', product_name: '虚构商品', color: '黑', size: 'L', promised_ship_day: due,
+})
+const input = (rows = [row('a', 'a1')]): BatchInput => ({
+  accountId: 'account-a', shopId: 'shop-a', day: '2026-11-14',
+  observedAt: '2026-11-14T02:00:00Z', sourceMode: 'all', action: 'print', rows,
+})
+const reset = () => useOrderFulfillmentStore.setState({ marks: {}, batches: [] })
+
+test('manual fulfillment batches move between in-memory categories and can be undone', () => {
+  reset()
+  const selected = input()
+  const store = useOrderFulfillmentStore.getState()
+  store.createBatch(selected)
+  const batch = useOrderFulfillmentStore.getState().batches[0]
+  assert.equal(useOrderFulfillmentStore.getState().marks[rowScopeKey(selected, 'a1')], 'to-order')
+  store.markBatchShipped(batch.id)
+  assert.equal(useOrderFulfillmentStore.getState().marks[rowScopeKey(selected, 'a1')], 'shipped')
+  store.restoreBatch(batch.id)
+  assert.deepEqual(useOrderFulfillmentStore.getState().marks, {})
 })
 
 test('crossing the Beijing day clears old marks and keeps current-day marks', () => {
-  const oldScope = { accountId: 'account-a', day: '2026-11-13', shopOrderId: 'old-order' }
-  const currentScope = { accountId: 'account-b', day: '2026-11-14', shopOrderId: 'current-order' }
-  useOrderFulfillmentStore.getState().markShipped(oldScope)
-  useOrderFulfillmentStore.getState().markToOrder(currentScope)
-  useOrderFulfillmentStore.getState().clearOtherDays('2026-11-14')
-  const marks = useOrderFulfillmentStore.getState().marks
-  assert.equal(marks[orderScopeKey(oldScope)], undefined)
-  assert.equal(marks[orderScopeKey(currentScope)], 'to-order')
-})
-
-test('source views hide an entire marked main order and category views retain all its item lines', () => {
-  const lines = [
-    { shop_order_id: 'order-1', sku_order_id: 'line-a' },
-    { shop_order_id: 'order-1', sku_order_id: 'line-b' },
-    { shop_order_id: 'order-2', sku_order_id: 'line-c' },
-  ]
-  const scope = { accountId: 'account-a', day: '2026-11-14', shopOrderId: 'order-1' }
-  useOrderFulfillmentStore.getState().markToOrder(scope)
-  const statusFor = (shopOrderId: string) => useOrderFulfillmentStore.getState().marks[
-    orderScopeKey({ ...scope, shopOrderId })
-  ]
-  assert.deepEqual(filterRowsByFulfillment(lines, 'pending', statusFor).map(row => row.sku_order_id), ['line-c'])
-  assert.deepEqual(filterRowsByFulfillment(lines, 'to-order', statusFor).map(row => row.sku_order_id), ['line-a', 'line-b'])
-  useOrderFulfillmentStore.getState().restorePending(scope)
-})
-
-test('single today action is idempotent and never moves completed or unselected orders backwards', () => {
-  const scope = (id: string) => ({ accountId: 'bulk-verification', day: '2026-11-14', shopOrderId: id })
+  reset()
   const store = useOrderFulfillmentStore.getState()
-  store.markShipped(scope('done'))
-  store.markManyToOrder([scope('today-a'), scope('today-b'), scope('today-a'), scope('done')])
-  store.markManyToOrder([scope('today-a'), scope('today-b')])
-  const marks = useOrderFulfillmentStore.getState().marks
-  assert.equal(marks[orderScopeKey(scope('today-a'))], 'to-order')
-  assert.equal(marks[orderScopeKey(scope('today-b'))], 'to-order')
-  assert.equal(marks[orderScopeKey(scope('done'))], 'shipped')
-  assert.equal(marks[orderScopeKey(scope('future'))], undefined)
-  const lines = [{shop_order_id:'today-a',quantity:2},{shop_order_id:'today-a',quantity:3},
-    {shop_order_id:'today-b',quantity:1},{shop_order_id:'future',quantity:4}]
-  const selected = filterRowsByFulfillment(lines, 'to-order', id => marks[orderScopeKey(scope(id))])
-  assert.equal(selected.reduce((sum,row)=>sum+row.quantity,0), 6)
-  for (const id of ['today-a','today-b','done']) store.restorePending(scope(id))
+  const old = { ...input(), day: '2026-11-13' }
+  const current = input()
+  store.createBatch(old)
+  store.createBatch(current)
+  store.clearOtherDays(current.day)
+  const state = useOrderFulfillmentStore.getState()
+  assert.equal(state.marks[rowScopeKey(old, 'a1')], undefined)
+  assert.equal(state.marks[rowScopeKey(current, 'a1')], 'to-order')
+  assert.equal(state.batches.length, 1)
 })
 
-test('a print batch keeps multi-item snapshots together through complete, repeat and undo', () => {
-  const row=(parent:string,child:string,quantity:number)=>({shop_order_id:parent,sku_order_id:child,quantity,
-    merchant_code:'DEMO',product_id:'product',product_name:'虚构验收',color:'黑',size:'L',promised_ship_day:'2026-11-14'})
-  const input={accountId:'batch-test',shopId:'test-shop',day:'2026-11-14',observedAt:'2026-11-14T02:00:00Z',rows:[row('a','a1',2),row('a','a2',3),row('b','b1',1)]}
-  const store=useOrderFulfillmentStore.getState()
-  store.createPrintBatch(input);store.createPrintBatch(input)
-  const batches=useOrderFulfillmentStore.getState().batches.filter(b=>b.accountId===input.accountId)
-  assert.equal(batches.length,1); assert.equal(batches[0].rows.length,3)
-  assert.equal(batches[0].rows.reduce((sum,r)=>sum+r.quantity,0),6)
-  store.completeBatch(batches[0].id);store.completeBatch(batches[0].id)
-  assert.ok(useOrderFulfillmentStore.getState().batches.find(b=>b.id===batches[0].id)?.orderedAt)
-  assert.equal(useOrderFulfillmentStore.getState().marks[orderScopeKey({...input,shopOrderId:'a'})],'shipped')
-  store.restoreBatch(batches[0].id);store.restoreBatch(batches[0].id)
-  assert.equal(useOrderFulfillmentStore.getState().batches.some(b=>b.id===batches[0].id),false)
-  assert.equal(useOrderFulfillmentStore.getState().marks[orderScopeKey({...input,shopOrderId:'a'})],undefined)
-  assert.throws(()=>store.createPrintBatch({...input,rows:[row('a','a1',2),row('a','a1',3)]}),/冲突/)
-  assert.equal(useOrderFulfillmentStore.getState().marks[orderScopeKey({...input,shopOrderId:'a'})],undefined)
+test('source views retain unclassified children of a partially classified parent', () => {
+  reset()
+  const rows = [row('a', 'a1'), row('a', 'a2', 2, '2026-11-15'), row('b', 'b1')]
+  const selected = input(rows)
+  const store = useOrderFulfillmentStore.getState()
+  store.createBatch({ ...selected, sourceMode: 'today', rows: [rows[0], rows[2]] })
+  const state = useOrderFulfillmentStore.getState()
+  assert.deepEqual(pendingRows(rows, 'all', selected, state.marks).map(item => item.sku_order_id), ['a2'])
+  assert.equal(pendingRows(rows, 'all', { ...selected, shopId: 'shop-b' }, state.marks).length, 3)
+})
+
+test('whole-list actions are idempotent and never move classified children backwards', () => {
+  reset()
+  const selected = input([row('a', 'a1', 2), row('a', 'a2', 3, '2026-11-15'), row('b', 'b1')])
+  const store = useOrderFulfillmentStore.getState()
+  store.createBatch({ ...selected, action: 'ship', rows: [selected.rows[0]] })
+  store.createBatch(selected)
+  store.createBatch(selected)
+  const state = useOrderFulfillmentStore.getState()
+  assert.equal(state.batches.length, 2)
+  assert.equal(state.marks[rowScopeKey(selected, 'a1')], 'shipped')
+  assert.equal(state.marks[rowScopeKey(selected, 'a2')], 'to-order')
+  assert.equal(state.batches.flatMap(batch => batch.rows).reduce((sum, item) => sum + item.quantity, 0), 6)
+  assert.equal(pendingRows(selected.rows, 'all', selected, state.marks).length, 0)
+})
+
+test('a batch keeps multi-item snapshots together through complete, repeat and undo', () => {
+  reset()
+  const selected = input([row('a', 'a1', 2), row('a', 'a2', 3), row('b', 'b1')])
+  const store = useOrderFulfillmentStore.getState()
+  store.createBatch(selected)
+  store.createBatch(selected)
+  const batch = useOrderFulfillmentStore.getState().batches[0]
+  assert.equal(batch.rows.length, 3)
+  assert.equal(batch.rows.reduce((sum, item) => sum + item.quantity, 0), 6)
+  store.markBatchShipped(batch.id)
+  store.markBatchShipped(batch.id)
+  assert.ok(useOrderFulfillmentStore.getState().batches[0].shippedAt)
+  store.restoreBatch(batch.id)
+  store.restoreBatch(batch.id)
+  assert.equal(useOrderFulfillmentStore.getState().batches.length, 0)
+  assert.throws(() => store.createBatch({ ...selected, rows: [row('a', 'a1', 2), row('a', 'a1', 3)] }), /冲突/)
+  assert.deepEqual(useOrderFulfillmentStore.getState().marks, {})
 })
