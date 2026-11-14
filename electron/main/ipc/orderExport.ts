@@ -25,7 +25,7 @@ const organizing = new Set<string>()
 type OrganizedRow = { shop_order_id: string; sku_order_id: string; product_id: string;
   product_name: string; merchant_code: string; color: string; size: string;
   variant_role: 'color' | 'raw_spec'; variant_review_reason: string;
-  quantity: number; source_spec: string; status: string; promised_ship_day: string }
+  quantity: number; source_spec: string; status: string; promised_ship_day: string; platform_created_at: string | null }
 
 function shopIdFromEvidence(evidence: OrderNetworkEvidence[]): string | null {
   const ids = new Set<string>()
@@ -128,7 +128,7 @@ export function organizedRows(capture: PendingOrderCapture, evidence: OrderNetwo
       variant_role: variant.role,
       variant_review_reason: variant.role === 'color' ? '' : '平台未标注颜色或款式类型；按原始规格展示',
       quantity: line.quantity!, source_spec: line.productName, status: '待发货',
-      promised_ship_day: item.promisedShipDay })
+      promised_ship_day: item.promisedShipDay, platform_created_at: line.placedAt })
   }
   if (rows.length !== products.size || new Set(rows.map(row => row.shop_order_id)).size !== partition.displayedPendingCount ||
       partition.pages.reduce((sum, page) => sum + page.parentCount, 0) !== partition.displayedPendingCount)
@@ -351,7 +351,7 @@ export function setupOrderExportIpcHandlers() {
       return { ok: true, parents: view.displayed_parent_count, children: view.rows.length,
         quantity: view.rows.reduce((sum, row) => sum + row.quantity, 0),
         empty: view.rows.length === 0, observedAt: capture.finishedAt,
-        message: `全部待发货：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；今日应发 ${new Set(todayRows.map(row => row.shop_order_id)).size} 个主订单。来源已核对 ${view.source_pending_count} 个待发货主订单，本机不保存订单内容。` }
+        message: `全部待发货：${view.displayed_parent_count} 个主订单、${view.rows.length} 个商品子订单；今日应发 ${new Set(todayRows.map(row => row.shop_order_id)).size} 个主订单。来源已核对 ${view.source_pending_count} 个待发货主订单；结果仅保存在本次运行内存中。` }
     } catch (error) {
       await stopObserving().catch(() => undefined)
       return { ok: false, message: `订单整理未通过核对：${error instanceof Error ? error.message : '未知错误'}；未保存订单。` }

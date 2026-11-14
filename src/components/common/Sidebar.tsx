@@ -48,6 +48,16 @@ export default function Sidebar() {
       name: '今日应发订单',
       icon: <ClipboardList className="w-5 h-5" />,
     },
+    {
+      id: '/orders/to-order',
+      name: '待下单订单',
+      icon: <ClipboardList className="w-5 h-5" />,
+    },
+    {
+      id: '/orders/manual-shipped',
+      name: '已发货订单（本机标记）',
+      icon: <PackageCheck className="w-5 h-5" />,
+    },
   ]
   const salesTabs: SidebarTab[] = [
     { id: '/sales/history', name: '销量历史', icon: <ChartColumn className="w-5 h-5" /> },
