@@ -25,6 +25,11 @@ from urllib.parse import parse_qs, quote, urlparse
 from zoneinfo import ZoneInfo
 from partial_due_display import render_partial_due
 
+# Frozen Windows apps can inherit an ANSI console; Chinese logs must not stop startup.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent
 # Set a separate directory for development or cloud work. The production default stays local.
 DATA = Path(os.environ.get("TUTIANDUO_DATA_DIR", str(ROOT / "data"))).expanduser()
