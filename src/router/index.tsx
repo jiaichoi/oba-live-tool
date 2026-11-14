@@ -26,12 +26,24 @@ export const router = createHashRouter([
         element: <AutoOrders />,
       },
       {
+        path: '/orders/to-order',
+        element: <AutoOrders mode="to-order" />,
+      },
+      {
+        path: '/orders/manual-shipped',
+        element: <AutoOrders mode="manual-shipped" />,
+      },
+      {
         path: '/orders/connect',
         element: <ShopConnect />,
       },
       {
         path: '/orders/shipped',
-        element: <Navigate to="/orders/due" replace />,
+        element: <Navigate to="/orders/all" replace />,
+      },
+      {
+        path: '/orders/batches',
+        element: <Navigate to="/orders/all" replace />,
       },
       {
         path: '/orders/all',
